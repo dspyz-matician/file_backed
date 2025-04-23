@@ -63,7 +63,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FBArc<T, B> {
 /// * `tracked`: The target persistent path information.
 /// * `max_simultaneous_tasks`: Controls the parallelism of the persist operations.
 /// * `change_key`: A closure executed *after* all persists succeed but *before* cleanup.
-///                 It should perform the atomic update of the external state.
+///   It should perform the atomic update of the external state.
 ///
 /// # Returns
 /// Returns `Ok(R)` if all persists and `change_key` succeed, otherwise returns `Err(E)`.
@@ -135,7 +135,6 @@ pub fn blocking_save_with<B: BackingStoreT, R, E>(
     let runtime = store.runtime_handle();
     runtime.block_on(store.sync(Arc::clone(tracked))).unwrap();
     let output = change_key()?;
-    let max_simultaneous_tasks = max_simultaneous_tasks;
     assert!(max_simultaneous_tasks > 0);
     let mut join_set = JoinSet::new();
     for key in old_keys {

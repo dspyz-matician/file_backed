@@ -181,7 +181,7 @@ impl<B: BackingStoreT> BackingStore<B> {
     /// # Arguments
     /// * `backing` - The low-level `BackingStoreT` implementation.
     /// * `runtime` - A handle to a Tokio runtime used for spawning background tasks
-    ///               and managing async operations.
+    ///   and managing async operations.
     pub fn new(backing: B, runtime: tokio::runtime::Handle) -> Self {
         Self {
             backing,
