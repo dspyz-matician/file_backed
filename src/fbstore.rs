@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use derive_where::derive_where;
+use log::warn;
 use uuid::Uuid;
 use walkdir::WalkDir;
 
@@ -159,21 +160,29 @@ impl<C: Send + Sync + 'static> BackingStoreT for FBStore<C> {
                 }
             }
             let file_name_os = entry.file_name();
-            let file_name_str = file_name_os.to_str().unwrap_or_else(|| {
-                panic!(
-                    "Failed to convert file name to string at {}: {:?}",
-                    entry.path().display(),
+            let Some(file_name_str) = file_name_os.to_str() else {
+                let path = entry.path();
+                warn!(
+                    "Failed to convert file name to string at {}, deleting file: {:?}",
+                    path.display(),
                     file_name_os
-                )
-            });
-            let key = Uuid::parse_str(file_name_str).unwrap_or_else(|err| {
-                panic!(
-                    "Failed to parse UUID from file name {}: {:?}",
-                    entry.path().display(),
-                    err
-                )
-            });
-            Some(key)
+                );
+                remove_file(path);
+                return None;
+            };
+            match Uuid::parse_str(file_name_str) {
+                Ok(key) => Some(key),
+                Err(err) => {
+                    let path = entry.path();
+                    warn!(
+                        "Failed to parse UUID from file name {}, deleting file: {:?}",
+                        path.display(),
+                        err
+                    );
+                    remove_file(path);
+                    None
+                }
+            }
         })
     }
 
@@ -189,6 +198,11 @@ impl<C: Send + Sync + 'static> BackingStoreT for FBStore<C> {
             )
         });
     }
+}
+
+fn remove_file(path: &Path) {
+    std::fs::remove_file(path)
+        .unwrap_or_else(|err| panic!("Failed to remove file {}: {:?}", path.display(), err));
 }
 
 impl<T, C: Codec<T>> Strategy<T> for FBStore<C> {
