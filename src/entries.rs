@@ -9,12 +9,12 @@ use uuid::Uuid;
 use crate::backing_store::{self, BackingStore, BackingStoreT, Strategy, TrackedPath};
 
 #[derive_where(Clone)]
-pub struct LimitedEntry<T, B: BackingStoreT> {
+pub(super) struct LimitedEntry<T, B: BackingStoreT> {
     backing: Weak<tokio::sync::RwLock<Backing<T, B>>>,
     meta: Arc<EntryMetadata>,
 }
 
-pub struct FullEntry<T, B: BackingStoreT> {
+pub(super) struct FullEntry<T, B: BackingStoreT> {
     backing: Arc<tokio::sync::RwLock<Backing<T, B>>>,
     meta: Arc<EntryMetadata>,
 }
@@ -25,12 +25,12 @@ struct EntryMetadata {
 }
 
 impl<T, B: BackingStoreT> LimitedEntry<T, B> {
-    pub fn has_full(&self) -> bool {
+    pub(super) fn has_full(&self) -> bool {
         self.backing.strong_count() > 0
     }
 
     /// Returns None if there are currently open handles or the full entry no longer exists
-    pub fn try_dump_to_disk(&self, store: &Arc<BackingStore<B>>) -> Option<JoinHandle<()>>
+    pub(super) fn try_dump_to_disk(&self, store: &Arc<BackingStore<B>>) -> Option<JoinHandle<()>>
     where
         T: Send + Sync + 'static,
         B: Strategy<T>,
@@ -50,7 +50,7 @@ impl<T, B: BackingStoreT> LimitedEntry<T, B> {
 }
 
 impl<T, B: BackingStoreT> FullEntry<T, B> {
-    pub fn new(data: T) -> Self {
+    pub(super) fn new(data: T) -> Self {
         Self {
             backing: Arc::new(tokio::sync::RwLock::new(Backing {
                 memory: Some(data),
@@ -63,18 +63,18 @@ impl<T, B: BackingStoreT> FullEntry<T, B> {
         }
     }
 
-    pub fn key(&self) -> Uuid {
+    pub(super) fn key(&self) -> Uuid {
         *self.meta.key.try_read().unwrap()
     }
 
-    pub fn limited(&self) -> LimitedEntry<T, B> {
+    pub(super) fn limited(&self) -> LimitedEntry<T, B> {
         LimitedEntry {
             backing: Arc::downgrade(&self.backing),
             meta: Arc::clone(&self.meta),
         }
     }
 
-    pub async fn register(
+    pub(super) async fn register(
         key: Uuid,
         store: &Arc<BackingStore<B>>,
         path: &Arc<TrackedPath<B::PersistPath>>,
@@ -90,7 +90,7 @@ impl<T, B: BackingStoreT> FullEntry<T, B> {
             .unwrap()
     }
 
-    pub fn blocking_register(
+    pub(super) fn blocking_register(
         key: Uuid,
         store: &Arc<BackingStore<B>>,
         path: &TrackedPath<B::PersistPath>,
@@ -109,7 +109,7 @@ impl<T, B: BackingStoreT> FullEntry<T, B> {
 }
 
 impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
-    pub fn load(&self, store: &Arc<BackingStore<B>>) -> RwLockReadGuard<T> {
+    pub(super) fn load(&self, store: &Arc<BackingStore<B>>) -> RwLockReadGuard<T> {
         if let Ok(read_guard) = self.backing.try_read() {
             if read_guard.memory.is_some() {
                 return RwLockReadGuard::map(read_guard, |b| b.memory.as_ref().unwrap());
@@ -119,7 +119,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
     }
 
     /// If aborted, the backing value may or may not have been loaded into memory.
-    pub async fn load_async(&self, store: &Arc<BackingStore<B>>) -> RwLockReadGuard<T> {
+    pub(super) async fn load_async(&self, store: &Arc<BackingStore<B>>) -> RwLockReadGuard<T> {
         let guard = loop {
             let read_guard = self.backing.read().await;
             if read_guard.memory.is_some() {
@@ -149,7 +149,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
         RwLockReadGuard::map(guard, |b| b.memory.as_ref().unwrap())
     }
 
-    pub fn blocking_load(&self, store: &BackingStore<B>) -> RwLockReadGuard<T> {
+    pub(super) fn blocking_load(&self, store: &BackingStore<B>) -> RwLockReadGuard<T> {
         let guard = loop {
             let read_guard = self.backing.blocking_read();
             if read_guard.memory.is_some() {
@@ -178,7 +178,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
     }
 
     /// If aborted, the backing value may or may not have been loaded into memory.
-    pub async fn load_mut(
+    pub(super) async fn load_mut(
         &mut self, // &mut necessary to avoid possibility of deadlock
         store: &Arc<BackingStore<B>>,
     ) -> RwLockMappedWriteGuard<T> {
@@ -206,7 +206,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
         RwLockWriteGuard::map(guard, |b| b.memory.as_mut().unwrap())
     }
 
-    pub fn blocking_load_mut(
+    pub(super) fn blocking_load_mut(
         &mut self, // &mut necessary to avoid possibility of deadlock
         store: &BackingStore<B>,
     ) -> RwLockMappedWriteGuard<T> {
@@ -220,7 +220,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
         RwLockWriteGuard::map(guard, |b| b.memory.as_mut().unwrap())
     }
 
-    pub fn spawn_write_now(&self, store: &Arc<BackingStore<B>>) -> JoinHandle<()> {
+    pub(super) fn spawn_write_now(&self, store: &Arc<BackingStore<B>>) -> JoinHandle<()> {
         let backing = Arc::clone(&self.backing);
         let meta = Arc::clone(&self.meta);
         let store_clone = Arc::clone(store);
@@ -230,12 +230,12 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
         })
     }
 
-    pub fn blocking_write_now(&self, store: &Arc<BackingStore<B>>) {
+    pub(super) fn blocking_write_now(&self, store: &Arc<BackingStore<B>>) {
         let read_guard = self.backing.blocking_read();
         read_guard.blocking_store(store, self.key());
     }
 
-    pub fn spawn_persist(
+    pub(super) fn spawn_persist(
         &self,
         store: &Arc<BackingStore<B>>,
         path: Arc<TrackedPath<B::PersistPath>>,
@@ -248,7 +248,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
         })
     }
 
-    pub fn blocking_persist(
+    pub(super) fn blocking_persist(
         &self,
         store: &Arc<BackingStore<B>>,
         path: &TrackedPath<B::PersistPath>,
