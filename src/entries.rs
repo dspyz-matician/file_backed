@@ -135,18 +135,16 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
             if write_guard.memory.is_some() {
                 continue;
             }
-            {
-                let store_clone = Arc::clone(store);
-                let meta = Arc::clone(&self.meta);
-                store
-                    .spawn_blocking(move || {
-                        let data = store_clone.load(write_guard.stored.get().unwrap());
-                        write_guard.memory = Some(data);
-                        meta.in_memory.notify_waiters();
-                    })
-                    .await
-                    .unwrap();
-            }
+            let store_clone = Arc::clone(store);
+            let meta = Arc::clone(&self.meta);
+            store
+                .spawn_blocking(move || {
+                    let data = store_clone.load(write_guard.stored.get().unwrap());
+                    write_guard.memory = Some(data);
+                    meta.in_memory.notify_waiters();
+                })
+                .await
+                .unwrap();
         };
         RwLockReadGuard::map(guard, |b| b.memory.as_ref().unwrap())
     }
@@ -194,16 +192,14 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
             // Since we have exclusive access to the full entry, no other task can
             // load the value (limited entries can only store, not load).
             assert!(owned_guard.memory.is_none());
-            {
-                let store_clone = Arc::clone(store);
-                store
-                    .spawn_blocking(move || {
-                        let data = store_clone.load(owned_guard.stored.get().unwrap());
-                        owned_guard.memory = Some(data);
-                    })
-                    .await
-                    .unwrap();
-            }
+            let store_clone = Arc::clone(store);
+            store
+                .spawn_blocking(move || {
+                    let data = store_clone.load(owned_guard.stored.get().unwrap());
+                    owned_guard.memory = Some(data);
+                })
+                .await
+                .unwrap();
         };
         guard.stored.take();
         *self.meta.key.try_write().unwrap() = Uuid::new_v4();
