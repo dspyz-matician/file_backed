@@ -136,15 +136,16 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
             }
             {
                 let store_clone = Arc::clone(store);
+                let meta = Arc::clone(&self.meta);
                 store
                     .spawn_blocking(move || {
                         let data = store_clone.load(write_guard.stored.get().unwrap());
                         write_guard.memory = Some(data);
+                        meta.in_memory.notify_waiters();
                     })
                     .await
                     .unwrap();
             }
-            self.meta.in_memory.notify_waiters();
         };
         RwLockReadGuard::map(guard, |b| b.memory.as_ref().unwrap())
     }
