@@ -128,6 +128,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
             let notified = self.meta.in_memory.notified();
             drop(read_guard);
             let mut write_guard = select! {
+                biased;
                 () = notified => continue,
                 guard = Arc::clone(&self.backing).write_owned() => guard,
             };
@@ -160,6 +161,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
             drop(read_guard);
             let write_guard = store.runtime_handle().block_on(async {
                 select! {
+                    biased;
                     () = notified => None,
                     guard = self.backing.write() => Some(guard),
                 }
