@@ -240,7 +240,11 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FBArc<T, B> {
     pub fn load(&self) -> ReadGuard<T, B> {
         shift_forward(&self.inner.pool, self.inner.index);
         let on_drop = GuardDropper::new(&self.inner.pool, self.inner.index);
-        let data_guard = self.entry.load(&self.inner.pool.store);
+        let data_guard = self.entry.try_load_cached().unwrap_or_else(|| {
+            let store = &self.inner.pool.store;
+            let runtime_handle = store.runtime_handle();
+            tokio::task::block_in_place(|| runtime_handle.block_on(self.entry.load_async(store)))
+        });
         ReadGuard {
             data_guard,
             _on_drop: on_drop,
