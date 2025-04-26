@@ -115,7 +115,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
                 return RwLockReadGuard::map(read_guard, |b| b.memory.as_ref().unwrap());
             }
         }
-        tokio::task::block_in_place(|| self.blocking_load(store))
+        tokio::task::block_in_place(|| store.runtime_handle().block_on(self.load_async(store)))
     }
 
     /// If aborted, the backing value may or may not have been loaded into memory.
@@ -145,34 +145,6 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
                 })
                 .await
                 .unwrap();
-        };
-        RwLockReadGuard::map(guard, |b| b.memory.as_ref().unwrap())
-    }
-
-    pub(super) fn blocking_load(&self, store: &BackingStore<B>) -> RwLockReadGuard<T> {
-        let guard = loop {
-            let read_guard = self.backing.blocking_read();
-            if read_guard.memory.is_some() {
-                break read_guard;
-            }
-            let notified = self.meta.in_memory.notified();
-            drop(read_guard);
-            let write_guard = store.runtime_handle().block_on(async {
-                select! {
-                    biased;
-                    () = notified => None,
-                    guard = self.backing.write() => Some(guard),
-                }
-            });
-            let Some(mut write_guard) = write_guard else {
-                continue;
-            };
-            if write_guard.memory.is_none() {
-                let data = store.load(write_guard.stored.get().unwrap());
-                write_guard.memory = Some(data);
-                self.meta.in_memory.notify_waiters();
-            }
-            break write_guard.downgrade();
         };
         RwLockReadGuard::map(guard, |b| b.memory.as_ref().unwrap())
     }

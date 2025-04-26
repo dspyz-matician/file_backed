@@ -276,13 +276,11 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FBArc<T, B> {
     /// This method should only be called from a context where blocking is acceptable
     /// (e.g., outside a Tokio runtime, or within `spawn_blocking` or `block_in_place`).
     pub fn blocking_load(&self) -> ReadGuard<T, B> {
-        shift_forward(&self.inner.pool, self.inner.index);
-        let on_drop = GuardDropper::new(&self.inner.pool, self.inner.index);
-        let data_guard = self.entry.blocking_load(&self.inner.pool.store);
-        ReadGuard {
-            data_guard,
-            _on_drop: on_drop,
-        }
+        self.inner
+            .pool
+            .store
+            .runtime_handle()
+            .block_on(self.load_async())
     }
 
     /// Asynchronously attempts to acquire mutable access to the data.
