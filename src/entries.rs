@@ -110,12 +110,18 @@ impl<T, B: BackingStoreT> FullEntry<T, B> {
 
 impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
     pub(super) fn load(&self, store: &Arc<BackingStore<B>>) -> RwLockReadGuard<T> {
-        if let Ok(read_guard) = self.backing.try_read() {
-            if read_guard.memory.is_some() {
-                return RwLockReadGuard::map(read_guard, |b| b.memory.as_ref().unwrap());
-            }
+        if let Some(guard) = self.try_load_cached() {
+            return guard;
         }
         tokio::task::block_in_place(|| store.runtime_handle().block_on(self.load_async(store)))
+    }
+
+    pub(super) fn try_load_cached(&self) -> Option<RwLockReadGuard<T>> {
+        let read_guard = self.backing.try_read().ok()?;
+        read_guard.memory.as_ref()?;
+        Some(RwLockReadGuard::map(read_guard, |b| {
+            b.memory.as_ref().unwrap()
+        }))
     }
 
     /// If aborted, the backing value may or may not have been loaded into memory.
