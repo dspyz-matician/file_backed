@@ -11,12 +11,16 @@ use crate::backing_store::{self, BackingStore, BackingStoreT, Strategy, TrackedP
 #[derive_where(Clone)]
 pub struct LimitedEntry<T, B: BackingStoreT> {
     backing: Weak<tokio::sync::RwLock<Backing<T, B>>>,
-    key: Arc<parking_lot::RwLock<Uuid>>, // Never contended
+    meta: Arc<EntryMetadata>,
 }
 
 pub struct FullEntry<T, B: BackingStoreT> {
     backing: Arc<tokio::sync::RwLock<Backing<T, B>>>,
-    key: Arc<parking_lot::RwLock<Uuid>>, // Never contended
+    meta: Arc<EntryMetadata>,
+}
+
+struct EntryMetadata {
+    key: parking_lot::RwLock<Uuid>, // Never contended
     in_memory: Notify,
 }
 
@@ -34,7 +38,7 @@ impl<T, B: BackingStoreT> LimitedEntry<T, B> {
         let arc = self.backing.upgrade()?;
         let mut guard = arc.try_write_owned().ok()?;
         // Make sure we're holding the write lock before we read the key so that it doesn't change
-        let key = *self.key.try_read().unwrap();
+        let key = *self.meta.key.try_read().unwrap();
         let store_clone = Arc::clone(store);
         Some(store.spawn_blocking(move || {
             guard.blocking_store(&store_clone, key);
@@ -52,19 +56,21 @@ impl<T, B: BackingStoreT> FullEntry<T, B> {
                 memory: Some(data),
                 stored: OnceLock::new(),
             })),
-            key: Arc::new(parking_lot::RwLock::new(Uuid::new_v4())),
-            in_memory: Notify::new(),
+            meta: Arc::new(EntryMetadata {
+                key: parking_lot::RwLock::new(Uuid::new_v4()),
+                in_memory: Notify::new(),
+            }),
         }
     }
 
     pub fn key(&self) -> Uuid {
-        *self.key.try_read().unwrap()
+        *self.meta.key.try_read().unwrap()
     }
 
     pub fn limited(&self) -> LimitedEntry<T, B> {
         LimitedEntry {
             backing: Arc::downgrade(&self.backing),
-            key: Arc::clone(&self.key),
+            meta: Arc::clone(&self.meta),
         }
     }
 
@@ -94,8 +100,10 @@ impl<T, B: BackingStoreT> FullEntry<T, B> {
                 memory: None,
                 stored: OnceLock::from(store.register(key, path)?),
             })),
-            key: Arc::new(parking_lot::RwLock::new(key)),
-            in_memory: Notify::new(),
+            meta: Arc::new(EntryMetadata {
+                key: parking_lot::RwLock::new(key),
+                in_memory: Notify::new(),
+            }),
         })
     }
 }
@@ -117,7 +125,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
             if read_guard.memory.is_some() {
                 break read_guard;
             }
-            let notified = self.in_memory.notified();
+            let notified = self.meta.in_memory.notified();
             drop(read_guard);
             let mut write_guard = select! {
                 () = notified => continue,
@@ -136,7 +144,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
                     .await
                     .unwrap();
             }
-            self.in_memory.notify_waiters();
+            self.meta.in_memory.notify_waiters();
         };
         RwLockReadGuard::map(guard, |b| b.memory.as_ref().unwrap())
     }
@@ -147,7 +155,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
             if read_guard.memory.is_some() {
                 break read_guard;
             }
-            let notified = self.in_memory.notified();
+            let notified = self.meta.in_memory.notified();
             drop(read_guard);
             let write_guard = store.runtime_handle().block_on(async {
                 select! {
@@ -161,7 +169,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
             if write_guard.memory.is_none() {
                 let data = store.load(write_guard.stored.get().unwrap());
                 write_guard.memory = Some(data);
-                self.in_memory.notify_waiters();
+                self.meta.in_memory.notify_waiters();
             }
             break write_guard.downgrade();
         };
@@ -195,7 +203,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
             }
         };
         guard.stored.take();
-        *self.key.try_write().unwrap() = Uuid::new_v4();
+        *self.meta.key.try_write().unwrap() = Uuid::new_v4();
         RwLockWriteGuard::map(guard, |b| b.memory.as_mut().unwrap())
     }
 
@@ -209,17 +217,17 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
             let data = store.load(&token.unwrap());
             guard.memory = Some(data);
         }
-        *self.key.try_write().unwrap() = Uuid::new_v4();
+        *self.meta.key.try_write().unwrap() = Uuid::new_v4();
         RwLockWriteGuard::map(guard, |b| b.memory.as_mut().unwrap())
     }
 
     pub fn spawn_write_now(&self, store: &Arc<BackingStore<B>>) -> JoinHandle<()> {
         let backing = Arc::clone(&self.backing);
-        let key = Arc::clone(&self.key);
+        let meta = Arc::clone(&self.meta);
         let store_clone = Arc::clone(store);
         store.spawn_blocking(move || {
             let guard = backing.blocking_read();
-            guard.blocking_store(&store_clone, *key.try_read().unwrap());
+            guard.blocking_store(&store_clone, *meta.key.try_read().unwrap());
         })
     }
 
@@ -234,10 +242,10 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
         path: Arc<TrackedPath<B::PersistPath>>,
     ) -> JoinHandle<()> {
         let backing = Arc::clone(&self.backing);
-        let key = Arc::clone(&self.key);
+        let meta = Arc::clone(&self.meta);
         let store_clone = Arc::clone(store);
         store.spawn_blocking(move || {
-            blocking_persist(&backing, &store_clone, &key, &path);
+            blocking_persist(&backing, &store_clone, &meta, &path);
         })
     }
 
@@ -246,7 +254,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
         store: &Arc<BackingStore<B>>,
         path: &TrackedPath<B::PersistPath>,
     ) {
-        blocking_persist(&self.backing, store, &self.key, path);
+        blocking_persist(&self.backing, store, &self.meta, path);
     }
 }
 
@@ -271,11 +279,11 @@ impl<T, B: Strategy<T>> Backing<T, B> {
 fn blocking_persist<T, B: Strategy<T>>(
     backing: &Arc<tokio::sync::RwLock<Backing<T, B>>>,
     store: &Arc<BackingStore<B>>,
-    key: &Arc<parking_lot::RwLock<Uuid>>,
+    meta: &EntryMetadata,
     path: &TrackedPath<<B as BackingStoreT>::PersistPath>,
 ) {
     let guard = backing.blocking_read();
-    let token = Arc::clone(guard.blocking_store(store, *key.try_read().unwrap()));
+    let token = Arc::clone(guard.blocking_store(store, *meta.key.try_read().unwrap()));
     drop(guard);
     store.persist(&token, path);
 }
