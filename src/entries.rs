@@ -18,7 +18,17 @@ pub(super) struct FullEntry<T, B: BackingStoreT> {
 }
 
 struct EntryMetadata {
-    key: parking_lot::RwLock<Uuid>, // Never contended
+    // This is never contended
+    //
+    // There's one place where we read the key that isn't guarded by the `backing` RwLock
+    // lock (`FullEntry::key`) and a separate place where we read/write the key without
+    // having the corresponding correct reference (&self, &mut self) to the FullEntry
+    // (`LimitedEntry::try_dump_to_disk`). These only both only grab read guards, not write 
+    // guards, so they won't contend with themselves or each other. For all other pairings,
+    // we're either guaranteed to avoid contention by already holding the backing lock guard
+    // or by rust's borrow checker or both. So we can safely use `try_read`/`try_write` and
+    // unwrap the result everywhere this is accessed.
+    key: parking_lot::RwLock<Uuid>,
     in_memory: Notify,
 }
 
