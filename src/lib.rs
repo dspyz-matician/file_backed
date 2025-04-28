@@ -122,6 +122,11 @@ impl<T, B: BackingStoreT> FBPool<T, B> {
     /// The data is initially placed only in the in-memory LRU cache. It will only be
     /// written to the backing store's temporary location if it's evicted from the cache
     /// or explicitly written via`persist`/`blocking_persist`/`spawn_write_now`/`blocking_write_now`.
+    /// 
+    /// Whenever the data is evicted from memory, after being written to the backing store
+    /// with `B::store`, the data will be dropped normally, which means if there's a custom `Drop`
+    /// implementation, it will be called. Each time the data is loaded back into memory, this
+    /// could happen again if the data is evicted again.
     pub fn insert(self: &Arc<Self>, data: T) -> FBItem<T, B>
     where
         T: Send + Sync + 'static,
