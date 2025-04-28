@@ -3,7 +3,6 @@ use std::ops::Deref;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use derive_where::derive_where;
 use log::warn;
 use uuid::Uuid;
 use walkdir::WalkDir;
@@ -60,10 +59,8 @@ impl<T: Default + prost::Message> Codec<T> for ProstCodec {
     }
 }
 
-#[derive_where(Debug)]
 pub struct PreparedPath {
     path: PathBuf,
-    #[derive_where(skip)]
     ignored: Vec<&'static str>,
 }
 
@@ -86,6 +83,14 @@ impl PreparedPath {
             });
         }
         Self { path, ignored }
+    }
+
+    pub fn path(&self) -> &PathBuf {
+        &self.path
+    }
+
+    pub fn ignored(&self) -> &Vec<&'static str> {
+        &self.ignored
     }
 }
 

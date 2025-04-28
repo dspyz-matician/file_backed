@@ -5,7 +5,6 @@ use std::{
 
 use consume_on_drop::{Consume, ConsumeOnDrop};
 use cutoff_list::CutoffList;
-use derive_where::derive_where;
 use parking_lot::RwLock;
 use tokio::{
     sync::{RwLockMappedWriteGuard, RwLockReadGuard},
@@ -45,7 +44,6 @@ pub struct FBItem<T, B: BackingStoreT> {
     inner: FBItemInner<T, B>,
 }
 
-#[derive_where(Clone)]
 struct FBItemInner<T, B: BackingStoreT> {
     index: cutoff_list::Index,
     pool: Arc<FBPool<T, B>>,

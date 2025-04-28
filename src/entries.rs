@@ -1,6 +1,5 @@
 use std::sync::{Arc, OnceLock, Weak};
 
-use derive_where::derive_where;
 use tokio::select;
 use tokio::sync::{Notify, RwLockMappedWriteGuard, RwLockReadGuard, RwLockWriteGuard};
 use tokio::task::JoinHandle;
@@ -8,7 +7,6 @@ use uuid::Uuid;
 
 use crate::backing_store::{self, BackingStore, BackingStoreT, Strategy, TrackedPath};
 
-#[derive_where(Clone)]
 pub(super) struct LimitedEntry<T, B: BackingStoreT> {
     backing: Weak<tokio::sync::RwLock<Backing<T, B>>>,
     meta: Arc<EntryMetadata>,
