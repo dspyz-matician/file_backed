@@ -1,10 +1,8 @@
-use std::sync::{
-    Arc, Weak,
-    atomic::{self, AtomicUsize},
-};
+use std::sync::{Arc, Weak};
 
 use dashmap::{DashMap, Entry};
-use tokio::{sync::Notify, task::JoinHandle};
+use tokio::task::JoinHandle;
+use tokio_util::task::TaskTracker;
 use uuid::Uuid;
 
 /// Defines the low-level interface for physically storing, retrieving,
@@ -109,29 +107,7 @@ pub struct BackingStore<B: BackingStoreT> {
     backing: B,
     use_counts: DashMap<Uuid, Weak<Token<B>>>,
     runtime: tokio::runtime::Handle,
-    running_tasks: AtomicUsize,
-    finished: Notify,
-}
-
-pub struct TaskTracker<B: BackingStoreT>(Arc<BackingStore<B>>);
-
-impl<B: BackingStoreT> TaskTracker<B> {
-    pub fn new(backing_store: Arc<BackingStore<B>>) -> Self {
-        backing_store
-            .running_tasks
-            .fetch_add(1, atomic::Ordering::Relaxed);
-        Self(backing_store)
-    }
-}
-
-impl<B: BackingStoreT> Drop for TaskTracker<B> {
-    fn drop(&mut self) {
-        let old_count = self.0.running_tasks.fetch_sub(1, atomic::Ordering::Release);
-        assert!(old_count > 0);
-        if old_count == 1 {
-            self.0.finished.notify_waiters();
-        }
-    }
+    task_tracker: TaskTracker,
 }
 
 pub(super) struct Token<B: BackingStoreT> {
@@ -187,8 +163,7 @@ impl<B: BackingStoreT> BackingStore<B> {
             backing,
             use_counts: DashMap::new(),
             runtime,
-            running_tasks: AtomicUsize::new(0),
-            finished: Notify::new(),
+            task_tracker: TaskTracker::new(),
         }
     }
 
@@ -221,12 +196,7 @@ impl<B: BackingStoreT> BackingStore<B> {
         self: &Arc<Self>,
         f: impl FnOnce() -> R + Send + 'static,
     ) -> JoinHandle<R> {
-        let task_tracker = TaskTracker::new(Arc::clone(self));
-        self.runtime.spawn_blocking(move || {
-            let output = f();
-            drop(task_tracker);
-            output
-        })
+        self.task_tracker.spawn_blocking_on(f, &self.runtime)
     }
 
     /// Returns a reference to the Tokio runtime handle used by this store.
@@ -234,16 +204,18 @@ impl<B: BackingStoreT> BackingStore<B> {
         &self.runtime
     }
 
+    /// Returns a reference to the underlying `TaskTracker` used for detecting
+    /// when all background tasks have completed.
+    pub fn task_tracker(&self) -> &TaskTracker {
+        &self.task_tracker
+    }
+
     /// Returns a future that completes when all background tasks currently queued or
     /// running within this `BackingStore` instance have finished.
     /// This includes tasks like delayed deletions or background flushes.
     pub async fn finished(&self) {
-        let notified = self.finished.notified();
-        if self.running_tasks.load(atomic::Ordering::Relaxed) > 0 {
-            notified.await;
-        } else {
-            atomic::fence(atomic::Ordering::Acquire);
-        }
+        self.task_tracker.close();
+        self.task_tracker.wait().await;
     }
 
     pub(super) fn store<T>(self: &Arc<Self>, key: Uuid, data: &T) -> Arc<Token<B>>

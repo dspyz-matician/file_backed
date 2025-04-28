@@ -3,7 +3,7 @@ use std::{collections::HashSet, sync::Arc};
 use tokio::task::JoinSet;
 use uuid::Uuid;
 
-use crate::backing_store::{BackingStore, BackingStoreT, Strategy, TaskTracker, TrackedPath};
+use crate::backing_store::{BackingStore, BackingStoreT, Strategy, TrackedPath};
 use crate::{FBItem, WriteGuard};
 
 impl<T: Send + Sync + 'static, B: Strategy<T>> FBItem<T, B> {
@@ -133,7 +133,10 @@ pub fn blocking_save_with<B: BackingStoreT, R, E>(
     persist_arcs(&mut persister)?;
     let new_keys_set = persister.new_keys_set;
     let runtime = store.runtime_handle();
-    runtime.block_on(store.sync(Arc::clone(tracked))).unwrap();
+    runtime.block_on(async move {
+        let _: Vec<()> = persister.join_set.join_all().await;
+        store.sync(Arc::clone(tracked)).await.unwrap();
+    });
     let output = change_key()?;
     assert!(max_simultaneous_tasks > 0);
     let mut join_set = JoinSet::new();
@@ -144,13 +147,19 @@ pub fn blocking_save_with<B: BackingStoreT, R, E>(
         if join_set.len() == max_simultaneous_tasks {
             runtime.block_on(join_set.join_next()).unwrap().unwrap();
         }
-        let task_tracker = TaskTracker::new(Arc::clone(store));
         let store = Arc::clone(store);
         let tracked = Arc::clone(tracked);
-        join_set.spawn_blocking_on(
-            move || {
-                store.blocking_delete_persisted(&tracked, key);
-                drop(task_tracker)
+        let task_tracker = store.task_tracker().clone();
+        let runtime_clone = runtime.clone();
+        join_set.spawn_on(
+            async move {
+                task_tracker
+                    .spawn_blocking_on(
+                        move || store.blocking_delete_persisted(&tracked, key),
+                        &runtime_clone,
+                    )
+                    .await
+                    .unwrap()
             },
             runtime,
         );
@@ -183,14 +192,17 @@ impl<B: BackingStoreT> Persister<B> {
                 .unwrap()
                 .unwrap();
         }
-        let task_tracker = TaskTracker::new(Arc::clone(&self.backing_store));
         let tracked = Arc::clone(&self.tracked);
         self.new_keys_set.insert(arc.key());
         let arc = Arc::clone(arc);
-        self.join_set.spawn_blocking_on(
-            move || {
-                arc.blocking_persist(&tracked);
-                drop(task_tracker);
+        let task_tracker = self.backing_store.task_tracker().clone();
+        let runtime_clone = runtime_handle.clone();
+        self.join_set.spawn_on(
+            async move {
+                task_tracker
+                    .spawn_blocking_on(move || arc.blocking_persist(&tracked), &runtime_clone)
+                    .await
+                    .unwrap()
             },
             runtime_handle,
         );
