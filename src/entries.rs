@@ -1,3 +1,7 @@
+//! This module presents an "intermediate" interface to be wrapped by FBPool/FBStore which is guaranteed
+//! never to deadlock. This allows the top-level lib to focus on integrating the backing store with the
+//! LRU cache without needing to carefully consider synchronization issues and possible race conditions.
+
 use std::sync::{Arc, OnceLock, Weak};
 
 use tokio::select;
@@ -45,7 +49,7 @@ impl<T, B: BackingStoreT> LimitedEntry<T, B> {
     {
         let arc = self.backing.upgrade()?;
         let mut guard = arc.try_write_owned().ok()?;
-        // Make sure we're holding the write lock before we read the key so that it doesn't change
+        // Make sure we're holding the write guard before we read the key so that it doesn't change
         let key = *self.meta.key.try_read().unwrap();
         let store_clone = Arc::clone(store);
         Some(store.spawn_blocking(move || {
