@@ -209,33 +209,12 @@ impl<T, B: BackingStoreT> FBItem<T, B> {
 }
 
 impl<T: Send + Sync + 'static, B: Strategy<T>> FBItem<T, B> {
-    /// Loads the data and returns a read guard for immutable access.
-    ///
-    /// - If the data is already in the memory cache, returns immediately.
-    /// - If the data is not in memory, it uses `tokio::task::block_in_place` to
-    ///   call `blocking_load` to load it from the backing store.
-    ///
-    /// # Panics
-    /// This method will panic if called from within a `tokio::runtime::Runtime`
-    /// created using `Runtime::new_current_thread`, as `block_in_place` is not
-    /// supported there. Use `load_async` instead in async contexts and
-    /// `blocking_load` in known blocking contexts.
-    pub fn load(&self) -> ReadGuard<T, B> {
-        shift_forward(&self.inner.pool, self.inner.index);
-        let on_drop = GuardDropper::new(&self.inner.pool, self.inner.index);
-        let data_guard = self.entry.load(&self.inner.pool.store);
-        ReadGuard {
-            data_guard,
-            _on_drop: on_drop,
-        }
-    }
-
     /// Asynchronously loads the data and returns a read guard.
     ///
     /// Returns a `Future` that resolves to a `ReadGuard` once the data is available
     /// in memory (either immediately or after loading from the backing store).
     /// Suitable for use within `async` functions and tasks.
-    pub async fn load_async(&self) -> ReadGuard<T, B> {
+    pub async fn load(&self) -> ReadGuard<T, B> {
         // We do this _before_ loading the backing value so that if the caller
         // cancels the operation, we don't waste the work done to load it by
         // immediately dumping it back to disk.
@@ -262,6 +241,32 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FBItem<T, B> {
         shift_forward(&self.inner.pool, self.inner.index);
         let on_drop = GuardDropper::new(&self.inner.pool, self.inner.index);
         let data_guard = self.entry.blocking_load(&self.inner.pool.store);
+        ReadGuard {
+            data_guard,
+            _on_drop: on_drop,
+        }
+    }
+
+    /// Loads the data and returns a read guard for immutable access.
+    ///
+    /// - If the data is already in the memory cache, returns immediately.
+    /// - If the data is not in memory, it uses `tokio::task::block_in_place` to
+    ///   call `blocking_load` to load it from the backing store.
+    ///
+    /// This is for the somewhat niche situation where you need to load an FBArc in a
+    /// blocking function nested many blocking calls deep within an async task running
+    /// on a tokio multithreaded runtime. Ideally you would propagate async down and use
+    /// `load` instead.
+    /// 
+    /// # Panics
+    /// This method will panic if called from within a `tokio::runtime::Runtime`
+    /// created using `Runtime::new_current_thread`, as `block_in_place` is not
+    /// supported there. Use `load` instead in async contexts and
+    /// `blocking_load` in known blocking contexts.
+    pub fn load_in_place(&self) -> ReadGuard<T, B> {
+        shift_forward(&self.inner.pool, self.inner.index);
+        let on_drop = GuardDropper::new(&self.inner.pool, self.inner.index);
+        let data_guard = self.entry.load(&self.inner.pool.store);
         ReadGuard {
             data_guard,
             _on_drop: on_drop,

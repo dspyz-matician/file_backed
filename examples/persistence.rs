@@ -65,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
         println!("Registered item with key: {}", persisted_key);
 
         // Load the registered item (loads from persist_dir link into cache_dir)
-        let guard = registered_item.load();
+        let guard = registered_item.load().await;
         println!("Loaded registered data: {}", *guard);
         assert_eq!(*guard, "Persisted Data");
         drop(guard);

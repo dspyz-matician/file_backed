@@ -52,19 +52,19 @@ async fn main() -> anyhow::Result<()> {
     let pool: Arc<FBPool<String, _>> = Arc::new(FBPool::new(store.clone(), 2)); // Cache size 2
 
     // 2. Insert items
-    let mut arcs = Vec::new();
-    arcs.push(pool.insert("Hello".to_string()));
-    arcs.push(pool.insert("World".to_string()));
-    arcs.push(pool.insert("!".to_string())); // "Hello" starts being evicted now
+    let mut items = Vec::new();
+    items.push(pool.insert("Hello".to_string()));
+    items.push(pool.insert("World".to_string()));
+    items.push(pool.insert("!".to_string())); // "Hello" starts being evicted now
 
     // 3. Load an item (might load from disk if evicted)
-    let guard = arcs[0].load(); // Load "Hello". Now "World" will be evicted.
+    let guard = items[0].load().await; // Load "Hello". Now "World" will be evicted.
     println!("Loaded: {}", *guard);
     assert_eq!(*guard, "Hello");
     drop(guard);
 
     // 4. Arcs automatically cleaned up when dropped
-    drop(arcs);
+    drop(items);
     store.finished().await; // Wait for background tasks to finish (e.g., file deletions)
 
     Ok(())
@@ -109,15 +109,15 @@ async fn main() -> anyhow::Result<()> {
 
         // Track persistent path & insert
         let tracked_persist = Arc::new(store.track_path(prepared_persist_path).await?);
-        let arc1 = pool.insert("Persisted Data".to_string());
-        persisted_key = arc1.key(); // Remember the key
+        let item1 = pool.insert("Persisted Data".to_string());
+        persisted_key = item1.key(); // Remember the key
 
         // Persist (e.g., hard-links to persist_dir)
-        arc1.spawn_persist(tracked_persist.clone()).await?;
+        item1.spawn_persist(tracked_persist.clone()).await?;
         // Optional: store.sync(tracked_persist).await?; // For durability
 
         println!("Persisted item with key: {}", persisted_key);
-        // arc1, pool, store dropped here; cache file might be deleted later
+        // item1, pool, store dropped here; cache file might be deleted later
         store.finished().await;
     }
 
@@ -135,7 +135,7 @@ async fn main() -> anyhow::Result<()> {
         let tracked_persist = Arc::new(store.track_path(prepared_persist_path).await?);
 
         // Register the previously persisted item by its key
-        let registered_arc = pool
+        let registered_item = pool
             .register(&tracked_persist, persisted_key)
             .await
             .expect("Failed to register item");
@@ -143,12 +143,12 @@ async fn main() -> anyhow::Result<()> {
         println!("Registered item with key: {}", persisted_key);
 
         // Load the registered item (loads from persist_dir link into cache_dir)
-        let guard = registered_arc.load();
+        let guard = registered_item.load();
         println!("Loaded registered data: {}", *guard);
         assert_eq!(*guard, "Persisted Data");
         drop(guard);
 
-        // registered_arc, pool, store dropped here
+        // registered_item, pool, store dropped here
         store.finished().await;
     }
 

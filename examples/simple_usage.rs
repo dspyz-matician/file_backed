@@ -24,7 +24,7 @@ async fn main() -> anyhow::Result<()> {
     items.push(pool.insert("!".to_string())); // "Hello" starts being evicted now
 
     // 3. Load an item (might load from disk if evicted)
-    let guard = items[0].load(); // Load "Hello". Now "World" will be evicted.
+    let guard = items[0].load().await; // Load "Hello". Now "World" will be evicted.
     println!("Loaded: {}", *guard);
     assert_eq!(*guard, "Hello");
     drop(guard);

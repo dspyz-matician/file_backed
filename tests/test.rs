@@ -250,7 +250,7 @@ async fn test_insert_and_load_async() {
     assert_eq!(Arc::strong_count(&arc1), 1);
 
     // --- Action: Load (from cache) ---
-    let guard1 = arc1.load_async().await;
+    let guard1 = arc1.load().await;
     assert_eq!(*guard1, data1);
     drop(guard1);
     // --- Verification ---
@@ -312,7 +312,7 @@ async fn test_eviction_triggers_store_reload_triggers_load() {
     assert!(!setup.store_impl.get_temp_keys().contains(&key2)); // data2 not written yet
 
     // --- Action: Load data1 (not in cache, evicts data2) ---
-    let guard1 = arc1.load_async().await; // Load data1
+    let guard1 = arc1.load().await; // Load data1
     assert_eq!(*guard1, data1);
     drop(guard1);
     // --- Verification ---
@@ -326,7 +326,7 @@ async fn test_eviction_triggers_store_reload_triggers_load() {
     assert!(setup.store_impl.get_temp_keys().contains(&key2));
 
     // --- Action: Load data2 (not in cache, evicts data1) ---
-    let guard2 = arc2.load_async().await; // Load data2
+    let guard2 = arc2.load().await; // Load data2
     assert_eq!(*guard2, data2);
     drop(guard2);
     // --- Verification ---
@@ -430,7 +430,7 @@ async fn test_register_does_not_load_or_store_first_load_does() {
     assert_eq!(arc.key(), reg_key);
 
     // --- Action: Load (first time) ---
-    let guard = arc.load_async().await;
+    let guard = arc.load().await;
     assert_eq!(*guard, reg_data);
     drop(guard);
     // --- Verification ---
@@ -438,7 +438,7 @@ async fn test_register_does_not_load_or_store_first_load_does() {
     assert_eq!(setup.calls.load.load(Ordering::SeqCst), 1);
 
     // --- Action: Load (second time - should be cached) ---
-    let guard2 = arc.load_async().await;
+    let guard2 = arc.load().await;
     assert_eq!(*guard2, reg_data);
     drop(guard2);
     // --- Verification ---
@@ -586,7 +586,7 @@ async fn test_persist_is_noop_if_already_persisted() {
     assert_eq!(setup.calls.persist.load(Ordering::SeqCst), 0);
 
     // --- Action: Load (just to double check item is valid) ---
-    let guard = arc.load_async().await;
+    let guard = arc.load().await;
     assert_eq!(*guard, data);
     drop(guard);
     // load: 1 (First load triggers Strategy::load because register doesn't load)
@@ -855,7 +855,7 @@ async fn test_guard_held_item_evicted_then_dumped_on_guard_drop() {
     assert_eq!(setup.calls.store.load(Ordering::SeqCst), 0);
 
     // --- Action: Load A and hold guard ---
-    let guard_a = arc_a.load_async().await; // Cache = [A], A is held
+    let guard_a = arc_a.load().await; // Cache = [A], A is held
     assert_eq!(*guard_a, data_a);
     assert_eq!(setup.calls.store.load(Ordering::SeqCst), 0);
     assert_eq!(setup.calls.load.load(Ordering::SeqCst), 0);
@@ -933,13 +933,13 @@ async fn test_lru_strict_half_behavior_on_access() {
 
         // --- Action: Access C (pos 1, front half) ---
         // Rule: Access front half -> no position change.
-        let _guard_c = arcs[2].load_async().await;
+        let _guard_c = arcs[2].load().await;
         drop(_guard_c);
         // Expected Cache: [D(0), C(1), B(2), A(3)]
 
         // --- Action: Access B (pos 2, back half) ---
         // Rule: Access back half -> move to front.
-        let _guard_b = arcs[1].load_async().await;
+        let _guard_b = arcs[1].load().await;
         drop(_guard_b);
         // Expected Cache: [B(0), D(1), C(2), A(3)] (A is still oldest)
 
@@ -983,19 +983,19 @@ async fn test_lru_strict_half_behavior_on_access() {
 
         // --- Action: Access C (pos 1, front half) ---
         // Rule: Access front half -> no position change.
-        let _guard_c = arcs[2].load_async().await;
+        let _guard_c = arcs[2].load().await;
         drop(_guard_c);
         // Expected Cache: [D(0), C(1), B(2), A(3)]
 
         // --- Action: Access B (pos 2, back half) ---
         // Rule: Access back half -> move to front.
-        let _guard_b = arcs[1].load_async().await;
+        let _guard_b = arcs[1].load().await;
         drop(_guard_b);
         // Expected Cache: [B(0), D(1), C(2), A(3)]
 
         // --- Action: Access A (pos 3, back half) ---
         // Rule: Access back half -> move to front.
-        let _guard_a = arcs[0].load_async().await;
+        let _guard_a = arcs[0].load().await;
         drop(_guard_a);
         // Expected Cache: [A(0), B(1), D(2), C(3)] (C is now oldest)
 
@@ -1113,7 +1113,7 @@ async fn test_try_load_mut_triggers_load_if_not_cached() {
     assert_ne!(original_key_a, new_key_a);
 
     // Final check: Load again (async) to verify content
-    let final_guard = item_a.load_async().await;
+    let final_guard = item_a.load().await;
     assert_eq!(final_guard.content, "Mutated A after load");
     drop(final_guard);
 
@@ -1958,7 +1958,7 @@ async fn test_load_triggers_blocking_load_if_not_cached() {
     // This call will use block_in_place internally because A is not cached.
     // It should block the current async test thread temporarily but succeed
     // because we specified the multi_thread runtime flavor.
-    let guard_a = arc_a.load(); // THE CALL BEING TESTED
+    let guard_a = arc_a.load_in_place(); // THE CALL BEING TESTED
 
     // --- Verification ---
     assert_eq!(*guard_a, data_a); // Verify data is correct
@@ -1989,7 +1989,7 @@ async fn test_load_returns_from_cache_if_present() {
     // --- Action: Call load() on A (cached) ---
     // This should return directly from the memory cache without
     // calling block_in_place or Strategy::load.
-    let guard_a = arc_a.load(); // THE CALL BEING TESTED
+    let guard_a = arc_a.load_in_place(); // THE CALL BEING TESTED
 
     // --- Verification ---
     assert_eq!(*guard_a, data_a); // Verify data is correct

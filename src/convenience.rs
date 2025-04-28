@@ -21,7 +21,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FBItem<T, B> {
         T: Clone,
     {
         if Arc::strong_count(self) > 1 {
-            let read_guard = self.load_async().await;
+            let read_guard = self.load().await;
             let new_arc = Arc::new(self.pool().insert(read_guard.clone()));
             drop(read_guard);
             *self = new_arc;
