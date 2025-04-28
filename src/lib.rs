@@ -26,35 +26,32 @@ use self::entries::{FullEntry, LimitedEntry};
 
 pub use self::backing_store::{BackingStore, BackingStoreT};
 
-/// A reference-counted handle to data managed by an `FBPool`.
+/// A handle to data managed by an `FBPool`.
 ///
-/// This acts like an `Arc` but for potentially large data (`T`) that might
+/// This acts like a `Box` but for potentially large data (`T`) that might
 /// reside either in memory (in an LRU cache) or on disk (in the backing store) or
 /// both.
 /// Accessing the underlying data requires calling one of the `load` methods.
 ///
-/// When the last `FBArc` pointing to an item is dropped:
+/// When dropped:
 /// - If the item was never persisted or written to the backing store's temporary
 ///   location, it is simply dropped.
 /// - If the item exists in the backing store's temporary location, a background
 ///   task is spawned via the `BackingStore` to delete it using `BackingStoreT::delete`.
 // Field ordering is important to remove entries from the cutoff list when
 // the last reference to the entry is dropped
-#[derive_where(Clone)]
-pub struct FBArc<T, B: BackingStoreT> {
-    entry: Arc<FullEntry<T, B>>,
-    inner: FBArcInner<T, B>,
+pub struct FBItem<T, B: BackingStoreT> {
+    entry: FullEntry<T, B>,
+    inner: FBItemInner<T, B>,
 }
-#[cfg(feature = "dupe")]
-impl<T, B: BackingStoreT> dupe::Dupe for FBArc<T, B> {}
 
 #[derive_where(Clone)]
-struct FBArcInner<T, B: BackingStoreT> {
+struct FBItemInner<T, B: BackingStoreT> {
     index: cutoff_list::Index,
     pool: Arc<FBPool<T, B>>,
 }
 
-impl<T, B: BackingStoreT> Drop for FBArcInner<T, B> {
+impl<T, B: BackingStoreT> Drop for FBItemInner<T, B> {
     fn drop(&mut self) {
         let read_guard = self.pool.entries.read();
         let Some(limited) = read_guard.get(self.index) else {
@@ -75,7 +72,7 @@ impl<T, B: BackingStoreT> Drop for FBArcInner<T, B> {
     }
 }
 
-/// Manages a pool of `FBArc` instances, backed by an in-memory cache
+/// Manages a pool of `FBItem` instances, backed by an in-memory cache
 /// and a `BackingStore` for disk persistence.
 ///
 /// ## Caching Strategy (Segmented LRU Variant)
@@ -122,12 +119,12 @@ impl<T, B: BackingStoreT> FBPool<T, B> {
         &self.store
     }
 
-    /// Inserts new `data` into the pool, returning an `FBArc` handle.
+    /// Inserts new `data` into the pool, returning an `FBItem` handle.
     ///
     /// The data is initially placed only in the in-memory LRU cache. It will only be
     /// written to the backing store's temporary location if it's evicted from the cache
-    /// or explicitly written via`register/blocking_register/spawn_write_now`/`blocking_write_now`.
-    pub fn insert(self: &Arc<Self>, data: T) -> FBArc<T, B>
+    /// or explicitly written via`persist`/`blocking_persist`/`spawn_write_now`/`blocking_write_now`.
+    pub fn insert(self: &Arc<Self>, data: T) -> FBItem<T, B>
     where
         T: Send + Sync + 'static,
         B: Strategy<T>,
@@ -140,9 +137,9 @@ impl<T, B: BackingStoreT> FBPool<T, B> {
             entry.try_dump_to_disk(&self.store);
         }
         drop(guard);
-        FBArc {
-            entry: Arc::new(entry),
-            inner: FBArcInner {
+        FBItem {
+            entry,
+            inner: FBItemInner {
                 index,
                 pool: Arc::clone(self),
             },
@@ -151,7 +148,7 @@ impl<T, B: BackingStoreT> FBPool<T, B> {
 
     /// Asynchronously registers an existing item from a persistent path into the pool.
     ///
-    /// Creates an `FBArc` handle for an item identified by `key` located at the
+    /// Creates an `FBItem` handle for an item identified by `key` located at the
     /// tracked persistent `path`. This typically involves calling `BackingStoreT::register`
     /// (e.g., hard-linking the file into the managed temporary area).
     ///
@@ -161,15 +158,15 @@ impl<T, B: BackingStoreT> FBPool<T, B> {
         self: &Arc<Self>,
         path: &Arc<TrackedPath<B::PersistPath>>,
         key: Uuid,
-    ) -> Option<FBArc<T, B>>
+    ) -> Option<FBItem<T, B>>
     where
         T: Send + Sync + 'static,
     {
         let entry = FullEntry::register(key, &self.store, path).await?;
         let index = self.entries.write().insert_last(entry.limited());
-        Some(FBArc {
-            entry: Arc::new(entry),
-            inner: FBArcInner {
+        Some(FBItem {
+            entry,
+            inner: FBItemInner {
                 index,
                 pool: Arc::clone(self),
             },
@@ -182,12 +179,12 @@ impl<T, B: BackingStoreT> FBPool<T, B> {
         self: &Arc<Self>,
         path: &TrackedPath<B::PersistPath>,
         key: Uuid,
-    ) -> Option<FBArc<T, B>> {
+    ) -> Option<FBItem<T, B>> {
         let entry = FullEntry::blocking_register(key, &self.store, path)?;
         let index = self.entries.write().insert_last(entry.limited());
-        Some(FBArc {
-            entry: Arc::new(entry),
-            inner: FBArcInner {
+        Some(FBItem {
+            entry,
+            inner: FBItemInner {
                 index,
                 pool: Arc::clone(self),
             },
@@ -200,32 +197,20 @@ impl<T, B: BackingStoreT> FBPool<T, B> {
     }
 }
 
-impl<T, B: BackingStoreT> FBArc<T, B> {
+impl<T, B: BackingStoreT> FBItem<T, B> {
     /// Returns the unique identifier (`Uuid`) for the data associated with this handle.
     /// This key will change if the data is mutated via `try_load_mut` or `make_mut`.
     pub fn key(&self) -> Uuid {
         self.entry.key()
     }
 
-    /// Returns a reference to the `FBPool` this `FBArc` belongs to.
+    /// Returns a reference to the `FBPool` this `FBItem` belongs to.
     pub fn pool(&self) -> &Arc<FBPool<T, B>> {
         &self.inner.pool
     }
-
-    /// Returns the total number of `FBArc` handles pointing to the same underlying data.
-    /// This does not include FBArcs which were separately `register`ed from the same
-    /// key (which may also have their own separate location in memory).
-    pub fn full_count(&self) -> usize {
-        Arc::strong_count(&self.entry)
-    }
-
-    /// Checks if two `FBArc` handles point to the same underlying data allocation.
-    pub fn ptr_eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.entry, &other.entry)
-    }
 }
 
-impl<T: Send + Sync + 'static, B: Strategy<T>> FBArc<T, B> {
+impl<T: Send + Sync + 'static, B: Strategy<T>> FBItem<T, B> {
     /// Loads the data and returns a read guard for immutable access.
     ///
     /// - If the data is already in the memory cache, returns immediately.
@@ -285,18 +270,14 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FBArc<T, B> {
         }
     }
 
-    /// Asynchronously attempts to acquire mutable access to the data.
+    /// Asynchronously acquires mutable access to the data.
     ///
-    /// Succeeds only if this `FBArc` is the *unique* reference (`full_count() == 1`).
-    /// If successful:
+    /// On return:
     /// 1. The data is ensured to be in memory.
     /// 2. The corresponding file in the backing store's temporary location (if any) is deleted.
     /// 3. The internal `Uuid` key for this data is changed.
     /// 4. A `WriteGuard` providing mutable access is returned.
-    ///
-    /// Returns `None` if this is not the unique reference.
-    pub async fn try_load_mut(&mut self) -> Option<WriteGuard<T, B>> {
-        let entry = Arc::get_mut(&mut self.entry)?;
+    pub async fn load_mut(&mut self) -> WriteGuard<T, B> {
         // We do this _before_ loading the backing value so that if the caller
         // cancels the operation, we don't waste the work done to load it by
         // immediately dumping it back to disk.
@@ -304,24 +285,23 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FBArc<T, B> {
         // Construct before loading so that if cancelled, the object will be dumped
         // if necessary (possible if a lot of things are loaded simultaneously).
         let on_drop = GuardDropper::new(&self.inner.pool, self.inner.index);
-        let data_guard = entry.load_mut(&self.inner.pool.store).await;
-        Some(WriteGuard {
+        let data_guard = self.entry.load_mut(&self.inner.pool.store).await;
+        WriteGuard {
             data_guard,
             _on_drop: on_drop,
-        })
+        }
     }
 
-    /// Blocking version of `try_load_mut`. Waits for the operation to complete.
+    /// Blocking version of `load_mut`. Waits for the operation to complete.
     /// Must not be called from an async context that isn't allowed to block.
-    pub fn blocking_try_load_mut(&mut self) -> Option<WriteGuard<T, B>> {
-        let entry = Arc::get_mut(&mut self.entry)?;
+    pub fn blocking_load_mut(&mut self) -> WriteGuard<T, B> {
         shift_forward(&self.inner.pool, self.inner.index);
         let on_drop = GuardDropper::new(&self.inner.pool, self.inner.index);
-        let data_guard = entry.blocking_load_mut(&self.inner.pool.store);
-        Some(WriteGuard {
+        let data_guard = self.entry.blocking_load_mut(&self.inner.pool.store);
+        WriteGuard {
             data_guard,
             _on_drop: on_drop,
-        })
+        }
     }
 
     /// Spawns a background task to immediately write the data to the backing store's
@@ -388,6 +368,7 @@ fn shift_forward<T: Send + Sync + 'static, B: Strategy<T>>(
 ///
 /// While this guard is alive, the data is guaranteed to remain loaded in memory
 /// and will not be evicted from memory even if it leaves the LRU cache.
+// Field ordering is important for try_dump_to_disk to succeed on drop
 pub struct ReadGuard<'a, T: Send + Sync + 'static, B: Strategy<T>> {
     data_guard: RwLockReadGuard<'a, T>,
     _on_drop: ConsumeOnDrop<GuardDropper<'a, T, B>>,

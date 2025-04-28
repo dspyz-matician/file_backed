@@ -18,19 +18,19 @@ async fn main() -> anyhow::Result<()> {
     let pool: Arc<FBPool<String, _>> = Arc::new(FBPool::new(store.clone(), 2)); // Cache size 2
 
     // 2. Insert items
-    let mut arcs = Vec::new();
-    arcs.push(pool.insert("Hello".to_string()));
-    arcs.push(pool.insert("World".to_string()));
-    arcs.push(pool.insert("!".to_string())); // "Hello" starts being evicted now
+    let mut items = Vec::new();
+    items.push(pool.insert("Hello".to_string()));
+    items.push(pool.insert("World".to_string()));
+    items.push(pool.insert("!".to_string())); // "Hello" starts being evicted now
 
     // 3. Load an item (might load from disk if evicted)
-    let guard = arcs[0].load(); // Load "Hello". Now "World" will be evicted.
+    let guard = items[0].load(); // Load "Hello". Now "World" will be evicted.
     println!("Loaded: {}", *guard);
     assert_eq!(*guard, "Hello");
     drop(guard);
 
     // 4. Arcs automatically cleaned up when dropped
-    drop(arcs);
+    drop(items);
     store.finished().await; // Wait for background tasks to finish (e.g., file deletions)
 
     Ok(())

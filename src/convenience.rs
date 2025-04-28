@@ -4,9 +4,9 @@ use tokio::task::JoinSet;
 use uuid::Uuid;
 
 use crate::backing_store::{BackingStore, BackingStoreT, Strategy, TaskTracker, TrackedPath};
-use crate::{FBArc, WriteGuard};
+use crate::{FBItem, WriteGuard};
 
-impl<T: Send + Sync + 'static, B: Strategy<T>> FBArc<T, B> {
+impl<T: Send + Sync + 'static, B: Strategy<T>> FBItem<T, B> {
     /// Asynchronously ensures unique access to the data, returning a `WriteGuard`.
     ///
     /// If this `FBArc` is not the unique reference (`full_count() > 1`), the underlying
@@ -16,33 +16,33 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FBArc<T, B> {
     ///
     /// If the operation is aborted (e.g., future dropped), this `FBArc` might or might
     /// not have been replaced with one wrapping the clone.
-    pub async fn make_mut(&mut self) -> WriteGuard<T, B>
+    pub async fn make_mut(self: &mut Arc<Self>) -> WriteGuard<T, B>
     where
         T: Clone,
     {
-        if self.full_count() > 1 {
+        if Arc::strong_count(self) > 1 {
             let read_guard = self.load_async().await;
-            let new_arc = self.pool().insert(read_guard.clone());
+            let new_arc = Arc::new(self.pool().insert(read_guard.clone()));
             drop(read_guard);
             *self = new_arc;
         }
-        self.try_load_mut().await.unwrap()
+        Arc::get_mut(self).unwrap().load_mut().await
     }
 
     /// Blocking version of `make_mut`. Waits for the operation (including potential cloning)
     /// to complete. Requires `T: Clone`.
     /// Must not be called from an async context that isn't allowed to block.
-    pub fn blocking_make_mut(&mut self) -> WriteGuard<T, B>
+    pub fn blocking_make_mut(self: &mut Arc<Self>) -> WriteGuard<T, B>
     where
         T: Clone,
     {
-        if self.full_count() > 1 {
+        if Arc::strong_count(self) > 1 {
             let read_guard = self.blocking_load();
-            let new_arc = self.pool().insert(read_guard.clone());
+            let new_arc = Arc::new(self.pool().insert(read_guard.clone()));
             drop(read_guard);
             *self = new_arc;
         }
-        self.blocking_try_load_mut().unwrap()
+        Arc::get_mut(self).unwrap().blocking_load_mut()
     }
 }
 
@@ -69,7 +69,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FBArc<T, B> {
 /// Returns `Ok(R)` if all persists and `change_key` succeed, otherwise returns `Err(E)`.
 pub fn blocking_save<T: Send + Sync + 'static, B: Strategy<T>, R, E>(
     store: &Arc<BackingStore<B>>,
-    arcs: impl IntoIterator<Item = FBArc<T, B>>,
+    arcs: impl IntoIterator<Item = Arc<FBItem<T, B>>>,
     tracked: &Arc<TrackedPath<B::PersistPath>>,
     max_simultaneous_tasks: usize,
     change_key: impl FnOnce() -> Result<R, E>,
@@ -171,7 +171,7 @@ pub struct Persister<B: BackingStoreT> {
 
 impl<B: BackingStoreT> Persister<B> {
     /// Registers an `FBArc` to be persisted as part of the `blocking_save_with` operation.
-    pub fn persist<T: Send + Sync + 'static>(&mut self, arc: &FBArc<T, B>)
+    pub fn persist<T: Send + Sync + 'static>(&mut self, arc: &Arc<FBItem<T, B>>)
     where
         B: Strategy<T>,
     {
@@ -186,7 +186,7 @@ impl<B: BackingStoreT> Persister<B> {
         let task_tracker = TaskTracker::new(Arc::clone(&self.backing_store));
         let tracked = Arc::clone(&self.tracked);
         self.new_keys_set.insert(arc.key());
-        let arc = FBArc::clone(arc);
+        let arc = Arc::clone(arc);
         self.join_set.spawn_blocking_on(
             move || {
                 arc.blocking_persist(&tracked);

@@ -11,7 +11,7 @@ use dashmap::{DashMap, DashSet};
 use uuid::Uuid;
 
 use file_backed::backing_store::{BackingStore, BackingStoreT, Strategy};
-use file_backed::{FBArc, FBPool, convenience::blocking_save};
+use file_backed::{FBItem, FBPool, convenience::blocking_save};
 
 // Simple clonable data structure for testing
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -238,7 +238,7 @@ async fn test_insert_and_load_async() {
     };
 
     // --- Action: Insert ---
-    let arc1 = setup.pool.insert(data1.clone());
+    let arc1 = Arc::new(setup.pool.insert(data1.clone()));
     // --- Verification ---
     // store: 0 (Insert only puts in cache)
     // load: 0
@@ -247,7 +247,7 @@ async fn test_insert_and_load_async() {
     assert_eq!(setup.calls.load.load(Ordering::SeqCst), 0);
     assert_eq!(setup.calls.delete.load(Ordering::SeqCst), 0);
     assert_eq!(setup.pool.size(), 1);
-    assert_eq!(arc1.full_count(), 1);
+    assert_eq!(Arc::strong_count(&arc1), 1);
 
     // --- Action: Load (from cache) ---
     let guard1 = arc1.load_async().await;
@@ -619,11 +619,11 @@ async fn test_try_load_mut_unique_deletes_original_temp() {
         content: "mutate_unique_del".to_string(),
     };
 
-    let mut arc = setup.pool.insert(data.clone());
-    let original_key = arc.key();
+    let mut item = setup.pool.insert(data.clone());
+    let original_key = item.key();
 
     // --- Action: Write original to temp store ---
-    let write_handle = arc.spawn_write_now();
+    let write_handle = item.spawn_write_now();
     write_handle.await.unwrap();
     // store: 1, delete: 0
     assert_eq!(setup.calls.store.load(Ordering::SeqCst), 1);
@@ -631,15 +631,13 @@ async fn test_try_load_mut_unique_deletes_original_temp() {
     assert_eq!(setup.calls.delete.load(Ordering::SeqCst), 0);
 
     // --- Action: Mutate (unique) ---
-    let maybe_guard = arc.try_load_mut().await; // Async version
-    assert!(maybe_guard.is_some());
-    let mut guard = maybe_guard.unwrap();
+    let mut guard = item.load_mut().await; // Async version
     guard.content = "mutated_content".to_string();
     drop(guard); // Original temp file deleted *during* try_load_mut
     // --- Verification ---
     // store: 1 (No new store call)
     // delete: 1 (Original key's temp file deleted)
-    let new_key = arc.key();
+    let new_key = item.key();
     assert_ne!(original_key, new_key);
     wait_for_store(&setup.backing_store).await; // Allow delete task to run
     assert_eq!(setup.calls.store.load(Ordering::SeqCst), 1);
@@ -648,7 +646,7 @@ async fn test_try_load_mut_unique_deletes_original_temp() {
     assert!(!setup.store_impl.get_temp_keys().contains(&new_key)); // New not written yet
 
     // --- Action: Drop Mutated Arc ---
-    drop(arc);
+    drop(item);
     wait_for_store(&setup.backing_store).await;
     // --- Verification ---
     // delete: 1 (Mutated version was never written to temp, so no new delete)
@@ -665,23 +663,21 @@ async fn test_try_load_mut_unique_original_not_written() {
         content: "mutate_unique_not_written".to_string(),
     };
 
-    let mut arc = setup.pool.insert(data.clone());
-    let original_key = arc.key();
+    let mut item = setup.pool.insert(data.clone());
+    let original_key = item.key();
     // store: 0, delete: 0
     assert_eq!(setup.calls.store.load(Ordering::SeqCst), 0);
     assert_eq!(setup.calls.delete.load(Ordering::SeqCst), 0);
     assert!(!setup.store_impl.get_temp_keys().contains(&original_key)); // Original not written
 
     // --- Action: Mutate (unique) ---
-    let maybe_guard = arc.try_load_mut().await;
-    assert!(maybe_guard.is_some());
-    let mut guard = maybe_guard.unwrap();
+    let mut guard = item.load_mut().await;
     guard.content = "mutated_content".to_string();
     drop(guard);
     // --- Verification ---
     // store: 0 (No store call)
     // delete: 0 (Original key's temp file didn't exist, so nothing to delete)
-    let new_key = arc.key();
+    let new_key = item.key();
     assert_ne!(original_key, new_key);
     wait_for_store(&setup.backing_store).await;
     assert_eq!(setup.calls.store.load(Ordering::SeqCst), 0);
@@ -690,7 +686,7 @@ async fn test_try_load_mut_unique_original_not_written() {
     assert!(!setup.store_impl.get_temp_keys().contains(&new_key));
 
     // --- Action: Drop Mutated Arc ---
-    drop(arc);
+    drop(item);
     wait_for_store(&setup.backing_store).await;
     // --- Verification ---
     // delete: 0 (Mutated version never written)
@@ -706,7 +702,7 @@ async fn test_make_mut_shared_clones_no_delete_during_call() {
         content: "make_mut_shared_clone".to_string(),
     };
 
-    let mut arc1 = setup.pool.insert(data.clone());
+    let mut arc1 = Arc::new(setup.pool.insert(data.clone()));
     let arc2 = arc1.clone(); // Shared reference
     let original_key = arc1.key();
 
@@ -729,7 +725,7 @@ async fn test_make_mut_shared_clones_no_delete_during_call() {
     let new_key = arc1.key();
     assert_ne!(original_key, new_key);
     assert_eq!(arc2.key(), original_key); // arc2 still points to original
-    assert!(!arc1.ptr_eq(&arc2));
+    assert!(!Arc::ptr_eq(&arc1, &arc2));
     wait_for_store(&setup.backing_store).await;
     assert_eq!(setup.calls.store.load(Ordering::SeqCst), 1);
     assert_eq!(setup.calls.delete.load(Ordering::SeqCst), 0); // Delete NOT called
@@ -779,8 +775,8 @@ async fn test_blocking_save_convenience() {
         .store_impl
         ._add_persisted(&path, existing_key, existing_data.clone());
 
-    let arc1 = setup.pool.insert(data1);
-    let arc2 = setup.pool.insert(data2);
+    let arc1 = Arc::new(setup.pool.insert(data1));
+    let arc2 = Arc::new(setup.pool.insert(data2));
     let key1 = arc1.key();
     let key2 = arc2.key();
 
@@ -1081,9 +1077,9 @@ async fn test_try_load_mut_triggers_load_if_not_cached() {
     };
 
     // --- Action: Insert A, Write A ---
-    let mut arc_a = setup.pool.insert(data_a.clone());
-    let original_key_a = arc_a.key();
-    let write_handle = arc_a.spawn_write_now();
+    let mut item_a = setup.pool.insert(data_a.clone());
+    let original_key_a = item_a.key();
+    let write_handle = item_a.spawn_write_now();
     write_handle.await.unwrap(); // A is now in temp store
     // store: 1, load: 0, delete: 0
     assert_eq!(setup.calls.store.load(Ordering::SeqCst), 1);
@@ -1098,37 +1094,33 @@ async fn test_try_load_mut_triggers_load_if_not_cached() {
     let stores_after_b_insert = setup.calls.store.load(Ordering::SeqCst); // Might be 1 or 2
 
     // --- Action: try_load_mut on A (unique, but not cached) ---
-    assert_eq!(arc_a.full_count(), 1); // Ensure unique reference
-    let maybe_guard = arc_a.try_load_mut().await;
+    let mut guard = item_a.load_mut().await;
 
     // --- Verification ---
-    assert!(maybe_guard.is_some()); // Mutation should succeed
     // load: 1 (A had to be loaded from disk)
     // delete: 1 (Original temp file for A deleted during try_load_mut)
     assert_eq!(setup.calls.load.load(Ordering::SeqCst), 1);
     wait_for_store(&setup.backing_store).await; // Wait for delete task
     assert_eq!(setup.calls.delete.load(Ordering::SeqCst), 1);
 
-    let mut guard = maybe_guard.unwrap();
     assert!(!setup.store_impl.get_temp_keys().contains(&original_key_a)); // Original temp gone
 
     // Modify data
     guard.content = "Mutated A after load".to_string();
     drop(guard);
 
-    let new_key_a = arc_a.key(); // Key changes upon getting guard
+    let new_key_a = item_a.key(); // Key changes upon getting guard
     assert_ne!(original_key_a, new_key_a);
 
     // Final check: Load again (async) to verify content
-    let final_guard = arc_a.load_async().await;
+    let final_guard = item_a.load_async().await;
     assert_eq!(final_guard.content, "Mutated A after load");
     drop(final_guard);
 
     // Check store count didn't increase further unless B was evicted again
     assert!(setup.calls.store.load(Ordering::SeqCst) <= stores_after_b_insert + 1); // Allow for potential re-eviction store
 
-    drop(arc_a); // Drop mutated arc (not written, no delete)
-    // drop(_arc_b) happens implicitly
+    drop(item_a); // Drop mutated item (not written, no delete)
     wait_for_store(&setup.backing_store).await;
     // Final delete count depends if B was stored and dropped. Should be >= 1.
     assert!(setup.calls.delete.load(Ordering::SeqCst) >= 1);
@@ -1148,8 +1140,8 @@ async fn test_blocking_save_skips_already_persisted() {
     };
 
     // --- Setup: Insert A, B ---
-    let arc_a = setup.pool.insert(data_a.clone());
-    let arc_b = setup.pool.insert(data_b.clone());
+    let arc_a = Arc::new(setup.pool.insert(data_a.clone()));
+    let arc_b = Arc::new(setup.pool.insert(data_b.clone()));
     let key_a = arc_a.key();
     let key_b = arc_b.key();
 
@@ -1250,8 +1242,10 @@ async fn test_blocking_save_more_items_than_max_simultaneous() {
             content: format!("Item {}", i),
         })
         .collect();
-    let arcs: Vec<FBArc<TestData, Arc<TestStore>>> =
-        items.iter().map(|d| setup.pool.insert(d.clone())).collect();
+    let arcs: Vec<Arc<FBItem<TestData, Arc<TestStore>>>> = items
+        .iter()
+        .map(|d| Arc::new(setup.pool.insert(d.clone())))
+        .collect();
     let keys: Vec<Uuid> = arcs.iter().map(|a| a.key()).collect();
 
     assert_eq!(setup.calls.persist.load(Ordering::SeqCst), 0);
@@ -1390,7 +1384,7 @@ async fn test_blocking_load_success() {
     };
 
     // Insert A, write A to temp store
-    let arc_a = setup.pool.insert(data_a.clone());
+    let arc_a = Arc::new(setup.pool.insert(data_a.clone()));
     let key_a = arc_a.key();
     tokio::task::spawn_blocking({
         let a = arc_a.clone();
@@ -1402,7 +1396,7 @@ async fn test_blocking_load_success() {
     assert!(setup.store_impl.get_temp_keys().contains(&key_a));
 
     // Insert B to evict A from cache
-    let _arc_b = setup.pool.insert(data_b.clone());
+    let _item_b = setup.pool.insert(data_b.clone());
     wait_for_store(&setup.backing_store).await; // Wait for potential eviction store
 
     assert_eq!(setup.calls.load.load(Ordering::SeqCst), 0); // No loads yet
@@ -1430,7 +1424,7 @@ async fn test_blocking_write_now_success() {
         content: "blocking_write_now".to_string(),
     };
 
-    let arc = setup.pool.insert(data.clone());
+    let arc = Arc::new(setup.pool.insert(data.clone()));
     let key = arc.key();
     assert!(!setup.store_impl.get_temp_keys().contains(&key));
     assert_eq!(setup.calls.store.load(Ordering::SeqCst), 0);
@@ -1469,7 +1463,7 @@ async fn test_blocking_persist_success() {
     };
     let path = test_path_a();
 
-    let arc = setup.pool.insert(data.clone());
+    let arc = Arc::new(setup.pool.insert(data.clone()));
     let key = arc.key();
     assert!(!setup.store_impl.get_temp_keys().contains(&key));
     assert!(!setup.store_impl.get_persisted_keys(&path).contains(&key));
@@ -1513,7 +1507,7 @@ async fn test_blocking_try_load_mut_success() {
         content: "blocking_try_mut".to_string(),
     };
 
-    let mut arc = setup.pool.insert(data.clone());
+    let mut arc = Arc::new(setup.pool.insert(data.clone()));
     let original_key = arc.key();
 
     // Write to temp store first
@@ -1529,7 +1523,7 @@ async fn test_blocking_try_load_mut_success() {
 
     // --- Action: blocking_try_load_mut ---
     let mutate_handle = tokio::task::spawn_blocking(move || {
-        let maybe_guard = arc.blocking_try_load_mut();
+        let maybe_guard = Arc::get_mut(&mut arc).map(FBItem::blocking_load_mut);
         assert!(maybe_guard.is_some());
         let mut guard = maybe_guard.unwrap();
         guard.content = "mutated_blocking".to_string();
@@ -1568,7 +1562,7 @@ async fn test_blocking_make_mut_success_unique() {
         content: "blocking_make_mut".to_string(),
     };
 
-    let mut arc = setup.pool.insert(data.clone());
+    let mut arc = Arc::new(setup.pool.insert(data.clone()));
     let original_key = arc.key();
 
     tokio::task::spawn_blocking({
@@ -1619,15 +1613,15 @@ async fn test_try_load_mut_fails_if_not_unique() {
     };
 
     // --- Setup: Create shared Arc ---
-    let mut arc1 = setup.pool.insert(data.clone());
+    let mut arc1 = Arc::new(setup.pool.insert(data.clone()));
     let arc2 = arc1.clone(); // Create a second reference
     let original_key = arc1.key();
     let initial_delete_count = setup.calls.delete.load(Ordering::SeqCst);
 
-    assert_eq!(arc1.full_count(), 2); // Verify it's shared
+    assert_eq!(Arc::strong_count(&arc1), 2); // Verify it's shared
 
     // --- Action: try_load_mut (async) ---
-    let result_async = arc1.try_load_mut().await;
+    let result_async = Arc::get_mut(&mut arc1);
 
     // --- Verification (async) ---
     assert!(result_async.is_none()); // Should fail
@@ -1644,7 +1638,7 @@ async fn test_try_load_mut_fails_if_not_unique() {
         // but we only need arc1 inside the closure.
         // Move arc1 into the closure. arc2 keeps the count > 1.
         let mut arc1_clone = arc1;
-        move || arc1_clone.blocking_try_load_mut().is_some()
+        move || Arc::get_mut(&mut arc1_clone).is_some()
     });
     let succeeded = handle_blocking.await.unwrap(); // Unwrap JoinError
     // Get arc1 back - its state shouldn't have changed
@@ -1680,7 +1674,7 @@ async fn test_blocking_save_many_deletions_exceeding_limit() {
         .collect();
     let initial_arcs: Vec<_> = initial_items
         .iter()
-        .map(|d| setup.pool.insert(d.clone()))
+        .map(|d| Arc::new(setup.pool.insert(d.clone())))
         .collect();
     let initial_keys: HashSet<Uuid> = initial_arcs.iter().map(|a| a.key()).collect();
 
@@ -1716,7 +1710,7 @@ async fn test_blocking_save_many_deletions_exceeding_limit() {
         .collect();
     let new_arcs: Vec<_> = new_items
         .iter()
-        .map(|d| setup.pool.insert(d.clone()))
+        .map(|d| Arc::new(setup.pool.insert(d.clone())))
         .collect();
     let new_keys: HashSet<Uuid> = new_arcs.iter().map(|a| a.key()).collect();
 
@@ -1781,7 +1775,7 @@ async fn test_blocking_make_mut_shared_clones() {
     };
 
     // --- Setup: Create shared Arc and write original data ---
-    let mut arc1 = setup.pool.insert(data.clone());
+    let mut arc1 = Arc::new(setup.pool.insert(data.clone()));
     let arc2 = arc1.clone(); // Shared reference
     let original_key = arc1.key();
 
@@ -1793,8 +1787,8 @@ async fn test_blocking_make_mut_shared_clones() {
 
     // --- Pre-Verification ---
     assert_eq!(setup.calls.store.load(Ordering::SeqCst), 1); // Original stored
-    assert!(arc1.ptr_eq(&arc2)); // Point to same data initially
-    assert_eq!(arc1.full_count(), 2); // Shared count
+    assert!(Arc::ptr_eq(&arc1, &arc2)); // Point to same data initially
+    assert_eq!(Arc::strong_count(&arc1), 2); // Shared count
     assert_eq!(setup.calls.delete.load(Ordering::SeqCst), 0); // No deletes yet
 
     // --- Action: blocking_make_mut on shared Arc ---
@@ -1811,9 +1805,9 @@ async fn test_blocking_make_mut_shared_clones() {
 
     // --- Verification ---
     // Counts and Pointers: arc1 is now unique, arc2 is unique, they point to different data
-    assert_eq!(arc1_mutated.full_count(), 1);
-    assert_eq!(arc2.full_count(), 1); // arc2 still exists and holds original
-    assert!(!arc1_mutated.ptr_eq(&arc2)); // No longer point to the same Arc entry
+    assert_eq!(Arc::strong_count(&arc1_mutated), 1);
+    assert_eq!(Arc::strong_count(&arc2), 1); // arc2 still exists and holds original
+    assert!(!Arc::ptr_eq(&arc1_mutated, &arc2)); // No longer point to the same Arc entry
 
     // Keys: arc1 has new key, arc2 has original key
     let new_key = arc1_mutated.key();
@@ -1871,7 +1865,7 @@ async fn test_blocking_try_load_mut_triggers_load_if_not_cached() {
     };
 
     // --- Setup: Insert A, write A, evict A ---
-    let mut arc_a = setup.pool.insert(data_a.clone());
+    let mut arc_a = Arc::new(setup.pool.insert(data_a.clone()));
     let original_key_a = arc_a.key();
 
     // Write A using blocking_write_now
@@ -1891,12 +1885,12 @@ async fn test_blocking_try_load_mut_triggers_load_if_not_cached() {
     let stores_after_b_insert = setup.calls.store.load(Ordering::SeqCst); // Might be 1 or 2
 
     // --- Action: blocking_try_load_mut on A (unique, not cached) ---
-    assert_eq!(arc_a.full_count(), 1); // Ensure unique reference
+    assert_eq!(Arc::strong_count(&arc_a), 1); // Ensure unique reference
     let mutate_handle = tokio::task::spawn_blocking(move || {
         // arc_a moved into closure
-        let maybe_guard = arc_a.blocking_try_load_mut(); // This should trigger load
-        assert!(maybe_guard.is_some());
-        let mut guard = maybe_guard.unwrap();
+        let maybe_entry = Arc::get_mut(&mut arc_a);
+        assert!(maybe_entry.is_some());
+        let mut guard = maybe_entry.unwrap().blocking_load_mut(); // This should trigger load 
         guard.content = "Mutated A after blocking load".to_string();
         drop(guard); // Deletes original temp file, assigns new key
         arc_a // Return mutated arc
