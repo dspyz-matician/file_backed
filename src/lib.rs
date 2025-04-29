@@ -51,22 +51,9 @@ struct FBItemInner<T, B: BackingStoreT> {
 
 impl<T, B: BackingStoreT> Drop for FBItemInner<T, B> {
     fn drop(&mut self) {
-        let read_guard = self.pool.entries.read();
-        let Some(limited) = read_guard.get(self.index) else {
-            return;
-        };
-        if limited.has_full() {
-            return;
-        }
-        drop(read_guard);
         let mut write_guard = self.pool.entries.write();
-        let Some(limited) = write_guard.get(self.index) else {
-            return;
-        };
-        if limited.has_full() {
-            return;
-        }
-        write_guard.remove(self.index);
+        let limited = write_guard.remove(self.index).unwrap();
+        assert!(!limited.has_full());
     }
 }
 
