@@ -5,6 +5,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
+    time::Duration,
 };
 
 use dashmap::{DashMap, DashSet};
@@ -32,6 +33,7 @@ pub struct TestStore {
     persisted_data: Arc<DashMap<PathBuf, DashSet<Uuid>>>,
     // Tracks calls for verification
     pub call_counts: Arc<CallCounts>,
+    store_sleep_duration: Duration,
 }
 
 #[derive(Debug, Default)]
@@ -47,12 +49,18 @@ pub struct CallCounts {
 }
 
 impl TestStore {
-    pub fn new() -> Self {
+    pub fn new(store_sleep_duration: Duration) -> Self {
         Self {
             temp_data: Arc::new(DashMap::new()),
             persisted_data: Arc::new(DashMap::new()),
             call_counts: Arc::new(Default::default()),
+            store_sleep_duration,
         }
+    }
+
+    // Helper to create with default zero sleep
+    pub fn new_no_sleep() -> Self {
+        Self::new(Duration::from_millis(0))
     }
 
     // Helper for tests to pre-populate persisted state
@@ -175,8 +183,15 @@ impl BackingStoreT for TestStore {
 impl Strategy<TestData> for TestStore {
     fn store(&self, key: Uuid, data: &TestData) {
         self.call_counts.store.fetch_add(1, Ordering::SeqCst);
-        println!("TestStore: Storing key {} data {:?}", key, data);
+        println!("TestStore: Storing key {} data {:?} - STARTING", key, data);
+
+        if !self.store_sleep_duration.is_zero() {
+            println!("TestStore: Sleeping for {:?}", self.store_sleep_duration);
+            std::thread::sleep(self.store_sleep_duration);
+        }
+
         self.temp_data.insert(key, data.clone());
+        println!("TestStore: Storing key {} data {:?} - COMPLETED", key, data);
     }
 
     fn load(&self, key: Uuid) -> TestData {
@@ -201,9 +216,13 @@ pub struct TestSetup {
 }
 
 pub fn setup(mem_size: usize) -> TestSetup {
+    setup_with_store_sleep(mem_size, Duration::from_millis(0)) // Default to zero sleep
+}
+
+pub fn setup_with_store_sleep(mem_size: usize, store_sleep: Duration) -> TestSetup {
     let runtime = tokio::runtime::Handle::current();
 
-    let store_impl = Arc::new(TestStore::new());
+    let store_impl = Arc::new(TestStore::new(store_sleep));
     let backing_store = Arc::new(BackingStore::new(store_impl.clone(), runtime.clone()));
     let pool = Arc::new(FBPool::new(backing_store.clone(), mem_size));
     let calls = store_impl.call_counts.clone();
@@ -1414,6 +1433,10 @@ async fn test_blocking_load_success() {
     // --- Verification ---
     assert_eq!(loaded_data, data_a);
     assert_eq!(setup.calls.load.load(Ordering::SeqCst), 1); // Load occurred
+
+    // --- Cleanup ---
+    drop(arc_a);
+    wait_for_store(&setup.backing_store).await; // Wait for delete task
 }
 
 #[tokio::test]
@@ -2311,4 +2334,111 @@ async fn test_blocking_register_same_persisted_key_twice() {
         move || store.blocking_delete_persisted(&t, key)
     });
     cleanup_handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn test_async_make_mut_unique_no_clone() {
+    let setup = setup(10);
+    // Ensure data is Clone, though it shouldn't be used here
+    let data_a = TestData {
+        id: 900,
+        content: "Async Make Mut Unique".to_string(),
+    };
+
+    // --- Setup: Insert A, write A. A is cached and unique. ---
+    let mut arc_a = Arc::new(setup.pool.insert(data_a.clone()));
+    let original_key_a = arc_a.key();
+    // Write A so delete behavior can be verified
+    let write_handle = arc_a.spawn_write_now();
+    write_handle.await.unwrap();
+    assert_eq!(setup.calls.store.load(Ordering::SeqCst), 1);
+    assert!(setup.store_impl.get_temp_keys().contains(&original_key_a));
+    assert_eq!(Arc::strong_count(&arc_a), 1); // Verify unique
+    assert_eq!(setup.calls.load.load(Ordering::SeqCst), 0); // No loads needed yet
+    assert_eq!(setup.calls.delete.load(Ordering::SeqCst), 0); // No deletes needed yet
+
+    // --- Action: Call async make_mut() ---
+    // Since it's unique, this should behave like try_load_mut:
+    // ensure cached (already is), delete original temp, change key, return guard.
+    let mut guard = arc_a.make_mut().await; // THE CALL BEING TESTED
+
+    // --- Verification ---
+    // load: 0 (No load needed, was cached)
+    // delete: 1 (Original temp file deleted because mutation occurred)
+    wait_for_store(&setup.backing_store).await; // Wait for delete task
+    assert_eq!(setup.calls.load.load(Ordering::SeqCst), 0);
+    assert_eq!(setup.calls.delete.load(Ordering::SeqCst), 1);
+    assert!(!setup.store_impl.get_temp_keys().contains(&original_key_a)); // Original temp gone
+
+    // Modify data via guard
+    guard.content = "Async Make Mut Unique - Modified".to_string();
+    drop(guard);
+
+    let new_key_a = arc_a.key(); // Key should change upon success
+    assert_ne!(original_key_a, new_key_a);
+
+    // Final check: Load content (async) to verify
+    let final_guard = arc_a.load().await;
+    assert_eq!(final_guard.content, "Async Make Mut Unique - Modified");
+    drop(final_guard);
+
+    // Cleanup
+    drop(arc_a); // Mutated wasn't stored, no further delete
+    wait_for_store(&setup.backing_store).await;
+    assert_eq!(setup.calls.delete.load(Ordering::SeqCst), 1); // Delete count remains 1
+}
+
+#[tokio::test]
+async fn test_try_load_fails_while_store_is_running_for_eviction() {
+    let sleep_duration = Duration::from_millis(50);
+    println!(
+        "NOTE: This test uses mock TestStore::store with sleep: {:?}",
+        sleep_duration
+    );
+    // --- USE SETUP WITH SLEEP ---
+    let setup = setup_with_store_sleep(1, sleep_duration); // Cache size 1, 50ms sleep
+    // ----------------------------
+    let data_a = TestData {
+        id: 960,
+        content: "Eviction Target A Sleep".to_string(),
+    };
+    let data_b = TestData {
+        id: 961,
+        content: "Evictor B Sleep".to_string(),
+    };
+
+    // Insert A - cached
+    let item_a = setup.pool.insert(data_a.clone());
+
+    // Insert B - triggers store(A), which will sleep.
+    let _item_b = setup.pool.insert(data_b.clone());
+
+    // Give the background task a moment to start the store call.
+    tokio::time::sleep(Duration::from_millis(10)).await; // Less than sleep_duration
+
+    // --- Action: Call try_load() on A while store(A) is likely sleeping ---
+    let maybe_guard = item_a.try_load();
+
+    // --- Verification ---
+    assert!(
+        maybe_guard.is_none(),
+        "try_load should fail if item is being evicted (store running)"
+    );
+    drop(maybe_guard);
+
+    // --- Cleanup (Allow background tasks to finish now) ---
+    // This await will now take at least ~40ms more.
+    wait_for_store(&setup.backing_store).await;
+    assert_eq!(
+        setup.calls.store.load(Ordering::SeqCst),
+        1,
+        "Store for A should have completed"
+    );
+
+    drop(item_a);
+    wait_for_store(&setup.backing_store).await;
+    assert!(
+        setup.calls.delete.load(Ordering::SeqCst) >= 1,
+        "Delete for A should have occurred"
+    );
 }

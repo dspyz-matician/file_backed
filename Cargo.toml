@@ -34,6 +34,7 @@ prostcodec = ["fbstore", "dep:prost"]
 
 [dev-dependencies]
 tempfile = "3.19.1"
+tokio = { version = "1.44.2", features = ["time"] }
 
 [[example]]
 name = "simple_usage"
