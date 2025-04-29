@@ -1,5 +1,6 @@
 use std::{collections::HashSet, sync::Arc};
 
+use get_mut_drop_weak::get_mut_drop_weak;
 use tokio::task::JoinSet;
 use uuid::Uuid;
 
@@ -9,24 +10,26 @@ use crate::{FBItem, WriteGuard};
 impl<T: Send + Sync + 'static, B: Strategy<T>> FBItem<T, B> {
     /// Asynchronously ensures unique access to the data, returning a `WriteGuard`.
     ///
-    /// If this `FBArc` is not the unique reference (`full_count() > 1`), the underlying
-    /// data `T` is cloned (requiring `T: Clone`). The `FBArc` is then updated to point
+    /// If this `Arc` is not the unique reference (`full_count() > 1`), the underlying
+    /// data `T` is cloned (requiring `T: Clone`). The `Arc` is then updated to point
     /// to this new, unique clone before returning the `WriteGuard`.
     /// Similar to `Arc::make_mut`.
     ///
-    /// If the operation is aborted (e.g., future dropped), this `FBArc` might or might
+    /// If the operation is aborted (e.g., future dropped), this `Arc` might or might
     /// not have been replaced with one wrapping the clone.
     pub async fn make_mut(self: &mut Arc<Self>) -> WriteGuard<T, B>
     where
         T: Clone,
     {
-        if Arc::strong_count(self) > 1 {
-            let read_guard = self.load().await;
-            let new_arc = Arc::new(self.pool().insert(read_guard.clone()));
-            drop(read_guard);
-            *self = new_arc;
-        }
-        Arc::get_mut(self).unwrap().load_mut().await
+        let arc = match get_mut_drop_weak(self) {
+            Ok(output) => return output.load_mut().await,
+            Err(arc) => arc,
+        };
+        let read_guard = arc.load().await;
+        let new_arc = Arc::new(arc.pool().insert(read_guard.clone()));
+        drop(read_guard);
+        *arc = new_arc;
+        Arc::get_mut(arc).unwrap().load_mut().await
     }
 
     /// Blocking version of `make_mut`. Waits for the operation (including potential cloning)
@@ -36,20 +39,22 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FBItem<T, B> {
     where
         T: Clone,
     {
-        if Arc::strong_count(self) > 1 {
-            let read_guard = self.blocking_load();
-            let new_arc = Arc::new(self.pool().insert(read_guard.clone()));
-            drop(read_guard);
-            *self = new_arc;
-        }
-        Arc::get_mut(self).unwrap().blocking_load_mut()
+        let arc = match get_mut_drop_weak(self) {
+            Ok(output) => return output.blocking_load_mut(),
+            Err(arc) => arc,
+        };
+        let read_guard = arc.blocking_load();
+        let new_arc = Arc::new(arc.pool().insert(read_guard.clone()));
+        drop(read_guard);
+        *arc = new_arc;
+        Arc::get_mut(arc).unwrap().blocking_load_mut()
     }
 }
 
-/// Atomically persists a collection of `FBArc`s and updates an external key/state.
+/// Atomically persists a collection of `Arc<FBItem>`s and updates an external key/state.
 ///
 /// This convenience function handles the pattern of:
-/// 1. Persisting multiple `FBArc` items to a `tracked` path (potentially in parallel).
+/// 1. Persisting multiple `FBItem` items to a `tracked` path (potentially in parallel).
 /// 2. Ensuring the `tracked` path is synced to disk.
 /// 3. Calling `change_key` (which should atomically update some external state, like a
 ///    master key reference file).
@@ -59,7 +64,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FBItem<T, B> {
 ///
 /// # Arguments
 /// * `store`: The `BackingStore` manager.
-/// * `arcs`: An iterator providing the `FBArc` handles to persist.
+/// * `arcs`: An iterator providing the `Arc<FBItem>` handles to persist.
 /// * `tracked`: The target persistent path information.
 /// * `max_simultaneous_tasks`: Controls the parallelism of the persist operations.
 /// * `change_key`: A closure executed *after* all persists succeed but *before* cleanup.
@@ -92,7 +97,7 @@ pub fn blocking_save<T: Send + Sync + 'static, B: Strategy<T>, R, E>(
 ///
 /// Similar to `blocking_save`, this handles atomically persisting items and updating state.
 /// Instead of an iterator of arcs, it takes a closure `persist_arcs` which receives a
-/// mutable `Persister`. The closure should call `Persister::persist` for each `FBArc`
+/// mutable `Persister`. The closure should call `Persister::persist` for each `FBItem`
 /// that needs to be included in this save operation.
 ///
 /// This allows for more complex scenarios where the set of items to persist might
@@ -169,7 +174,7 @@ pub fn blocking_save_with<B: BackingStoreT, R, E>(
 }
 
 /// A helper struct used within the `persist_arcs` closure of `blocking_save_with`.
-/// It collects the `FBArc` handles that need to be persisted.
+/// It collects the `Arc<FBItem>` handles that need to be persisted.
 pub struct Persister<B: BackingStoreT> {
     backing_store: Arc<BackingStore<B>>,
     tracked: Arc<TrackedPath<B::PersistPath>>,
@@ -179,7 +184,7 @@ pub struct Persister<B: BackingStoreT> {
 }
 
 impl<B: BackingStoreT> Persister<B> {
-    /// Registers an `FBArc` to be persisted as part of the `blocking_save_with` operation.
+    /// Registers an `Arc<FBItem>` to be persisted as part of the `blocking_save_with` operation.
     pub fn persist<T: Send + Sync + 'static>(&mut self, arc: &Arc<FBItem<T, B>>)
     where
         B: Strategy<T>,

@@ -154,6 +154,7 @@ dependencies = [
  "consume_on_drop",
  "cutoff_list",
  "dashmap",
+ "get_mut_drop_weak",
  "log",
  "nix",
  "parking_lot",
@@ -208,6 +209,12 @@ dependencies = [
  "pin-utils",
  "slab",
 ]
+
+[[package]]
+name = "get_mut_drop_weak"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "87243aac4c993c2e635b7a5659c36535efa402e113a6ddec2647ed15cbc383d5"
 
 [[package]]
 name = "getrandom"
