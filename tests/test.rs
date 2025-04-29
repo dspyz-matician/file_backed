@@ -151,7 +151,7 @@ impl BackingStoreT for TestStore {
             .insert(key);
     }
 
-    fn all_persisted_keys(&self, path: &Self::PersistPath) -> impl IntoIterator<Item = Uuid> {
+    fn sanitize_path(&self, path: &Self::PersistPath) -> impl IntoIterator<Item = Uuid> {
         self.call_counts
             .all_persisted_keys
             .fetch_add(1, Ordering::SeqCst);

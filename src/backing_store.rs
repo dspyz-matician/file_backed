@@ -35,8 +35,9 @@ pub trait BackingStoreT: Send + Sync + 'static {
     /// The backing data is never mutated after creation.
     fn persist(&self, dest_path: &Self::PersistPath, key: Uuid);
 
-    /// Returns an iterator over all keys known to exist at the persisted location `path`.
-    fn all_persisted_keys(&self, path: &Self::PersistPath) -> impl IntoIterator<Item = Uuid>;
+    /// Clean up and prepare the contents of the provided path to be used as a persistent
+    /// store and return an iterator over all keys known to exist at the persisted location `path`.
+    fn sanitize_path(&self, path: &Self::PersistPath) -> impl IntoIterator<Item = Uuid>;
 
     /// Ensures that all previous operations related to `path` are durably stored
     /// (e.g., by calling `syncfs` on the file system containing the directory).
@@ -77,8 +78,8 @@ impl<B: BackingStoreT> BackingStoreT for Arc<B> {
         B::persist(self, dest_path, key)
     }
 
-    fn all_persisted_keys(&self, path: &Self::PersistPath) -> impl IntoIterator<Item = Uuid> {
-        B::all_persisted_keys(self, path)
+    fn sanitize_path(&self, path: &Self::PersistPath) -> impl IntoIterator<Item = Uuid> {
+        B::sanitize_path(self, path)
     }
 
     fn sync_persisted(&self, path: &Self::PersistPath) {
@@ -185,7 +186,7 @@ impl<B: BackingStoreT> BackingStore<B> {
         self: &Arc<Self>,
         path: B::PersistPath,
     ) -> TrackedPath<B::PersistPath> {
-        let all_keys = self.backing.all_persisted_keys(&path);
+        let all_keys = self.backing.sanitize_path(&path);
         let present = key_map(all_keys);
         TrackedPath { path, present }
     }

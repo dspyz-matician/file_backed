@@ -255,7 +255,7 @@ impl<C: Send + Sync + 'static> BackingStoreT for FBStore<C> {
     ///
     /// **Warning:** Files with non-UTF8 names or names that fail to parse as UUIDs
     /// will be logged as warnings and **deleted** from the filesystem during the scan.
-    fn all_persisted_keys(&self, path: &Self::PersistPath) -> impl IntoIterator<Item = Uuid> {
+    fn sanitize_path(&self, path: &Self::PersistPath) -> impl IntoIterator<Item = Uuid> {
         WalkDir::new(&**path).into_iter().filter_map(|entry| {
             let entry = entry.unwrap_or_else(|err| {
                 panic!("Failed to read directory {}: {:?}", path.display(), err)
