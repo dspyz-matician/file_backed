@@ -2442,3 +2442,64 @@ async fn test_try_load_fails_while_store_is_running_for_eviction() {
         "Delete for A should have occurred"
     );
 }
+
+#[tokio::test]
+async fn test_sync_try_load_mut_fails_while_store_is_running_for_eviction() {
+    let sleep_duration = Duration::from_millis(50);
+    println!(
+        "NOTE: This test uses mock TestStore::store with sleep: {:?}",
+        sleep_duration
+    );
+    // --- USE SETUP WITH SLEEP ---
+    let setup = setup_with_store_sleep(1, sleep_duration); // Cache size 1, 50ms sleep
+    // ----------------------------
+    let data_a = TestData {
+        id: 970,
+        content: "Eviction Target Mut A Sleep".to_string(),
+    };
+    let data_b = TestData {
+        id: 971,
+        content: "Evictor Mut B Sleep".to_string(),
+    };
+
+    // Insert A - cached and unique
+    let mut item_a = setup.pool.insert(data_a.clone());
+
+    // Insert B - should trigger eviction process for A, which calls store(A).
+    // The store(A) call will sleep for 50ms due to our modification.
+    let _arc_b = setup.pool.insert(data_b.clone());
+
+    // Give the background task a brief moment to potentially start, but less than the sleep duration.
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    // --- Action: Call sync try_load_mut() on A while store(A) is likely sleeping ---
+    // Even though arc_a is unique, it should fail because it's "being evicted" / not resident.
+    let maybe_guard = item_a.try_load_mut(); // THE CALL BEING TESTED
+
+    // --- Verification ---
+    assert!(
+        maybe_guard.is_none(),
+        "sync try_load_mut should fail if item is being evicted (store running)"
+    );
+    drop(maybe_guard);
+    // Verify no side effects from failed try_load_mut
+    assert_eq!(setup.calls.load.load(Ordering::SeqCst), 0);
+    assert_eq!(setup.calls.delete.load(Ordering::SeqCst), 0); // No delete call triggered
+
+    // --- Cleanup (Allow background tasks to finish now) ---
+    // This await will now take at least ~40ms more because store(A) was sleeping.
+    wait_for_store(&setup.backing_store).await;
+    assert_eq!(
+        setup.calls.store.load(Ordering::SeqCst),
+        1,
+        "Store for A should have completed"
+    );
+
+    drop(item_a);
+    wait_for_store(&setup.backing_store).await;
+    // Delete should happen eventually for A as it was stored
+    assert!(
+        setup.calls.delete.load(Ordering::SeqCst) >= 1,
+        "Delete for A should have occurred"
+    );
+}
