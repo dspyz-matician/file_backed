@@ -2002,3 +2002,165 @@ async fn test_load_returns_from_cache_if_present() {
     wait_for_store(&setup.backing_store).await;
     assert_eq!(setup.calls.delete.load(Ordering::SeqCst), 0);
 }
+
+#[tokio::test] // No specific flavor needed, assuming try_load is non-blocking
+async fn test_try_load_success_when_cached() {
+    let setup = setup(10); // Ensure space in cache
+    let data_a = TestData {
+        id: 700,
+        content: "Try Load Cached A".to_string(),
+    };
+
+    // --- Setup: Insert A (it's now in cache) ---
+    let item_a = setup.pool.insert(data_a.clone());
+    assert_eq!(setup.calls.load.load(Ordering::SeqCst), 0); // No loads yet
+
+    // --- Action: Call try_load() on cached item ---
+    let maybe_guard = item_a.try_load();
+
+    // --- Verification ---
+    assert!(maybe_guard.is_some()); // Expect success
+    let guard = maybe_guard.unwrap();
+    assert_eq!(*guard, data_a); // Verify data
+    // load: 0 (Strategy::load should NOT have been called)
+    assert_eq!(setup.calls.load.load(Ordering::SeqCst), 0);
+
+    // --- Cleanup ---
+    drop(guard);
+    drop(item_a);
+    wait_for_store(&setup.backing_store).await;
+    assert_eq!(setup.calls.delete.load(Ordering::SeqCst), 0); // Not stored, no delete
+}
+
+#[tokio::test]
+async fn test_try_load_fails_when_not_cached() {
+    let setup = setup(1); // Cache size 1 to force eviction
+    let data_a = TestData {
+        id: 710,
+        content: "Try Load Evicted A".to_string(),
+    };
+    let data_b = TestData {
+        id: 711,
+        content: "Try Load Evictor B".to_string(),
+    };
+
+    // --- Setup: Insert A, write A, evict A ---
+    let item_a = setup.pool.insert(data_a.clone());
+    // Write A to temp store so it *could* be loaded, but won't be by try_load
+    let write_handle = item_a.spawn_write_now();
+    write_handle.await.unwrap();
+    assert_eq!(setup.calls.store.load(Ordering::SeqCst), 1);
+
+    // Insert B to evict A
+    let _item_b = setup.pool.insert(data_b.clone());
+    wait_for_store(&setup.backing_store).await; // Wait for potential eviction store of B
+
+    assert_eq!(setup.calls.load.load(Ordering::SeqCst), 0); // No loads yet
+
+    // --- Action: Call try_load() on evicted item A ---
+    let maybe_guard = item_a.try_load();
+
+    // --- Verification ---
+    assert!(maybe_guard.is_none()); // Expect failure (None)
+    // load: 0 (Strategy::load should NOT have been called)
+    assert_eq!(setup.calls.load.load(Ordering::SeqCst), 0);
+
+    // --- Cleanup ---
+    drop(maybe_guard);
+    drop(item_a); // A was stored, should be deleted
+    wait_for_store(&setup.backing_store).await;
+    assert!(setup.calls.delete.load(Ordering::SeqCst) >= 1); // Delete for A occurred
+}
+
+#[tokio::test]
+async fn test_sync_try_load_mut_success_when_cached() {
+    let setup = setup(10); // Cache size 10
+    let data_a = TestData {
+        id: 720,
+        content: "Sync Try Mut A".to_string(),
+    };
+
+    // --- Setup: Insert A, write A. A is cached and unique. ---
+    let mut item_a = setup.pool.insert(data_a.clone());
+    let original_key_a = item_a.key();
+    // Write A so delete behavior can be verified
+    let write_handle = item_a.spawn_write_now();
+    write_handle.await.unwrap();
+    assert_eq!(setup.calls.store.load(Ordering::SeqCst), 1);
+    assert!(setup.store_impl.get_temp_keys().contains(&original_key_a));
+    assert_eq!(setup.calls.load.load(Ordering::SeqCst), 0); // No loads needed yet
+    assert_eq!(setup.calls.delete.load(Ordering::SeqCst), 0); // No deletes needed yet
+
+    // --- Action: Call sync try_load_mut() ---
+    let maybe_guard = item_a.try_load_mut(); // The synchronous call being tested
+
+    // --- Verification ---
+    assert!(maybe_guard.is_some()); // Expect success
+    // load: 0 (No load needed, was cached)
+    // delete: 1 (Original temp file deleted)
+    wait_for_store(&setup.backing_store).await; // Wait for delete task
+    assert_eq!(setup.calls.load.load(Ordering::SeqCst), 0);    
+    assert_eq!(setup.calls.delete.load(Ordering::SeqCst), 1);
+    assert!(!setup.store_impl.get_temp_keys().contains(&original_key_a)); // Original temp gone
+
+    // Modify data via guard
+    let mut guard = maybe_guard.unwrap();
+    guard.content = "Sync Mutated A".to_string();
+    drop(guard);
+
+    let new_key_a = item_a.key(); // Key should change upon success
+    assert_ne!(original_key_a, new_key_a);
+
+    // Final check: Load content (async) to verify
+    let final_guard = item_a.load().await;
+    assert_eq!(final_guard.content, "Sync Mutated A");
+    drop(final_guard);
+
+    // Cleanup
+    drop(item_a); // Mutated wasn't stored, no further delete
+    wait_for_store(&setup.backing_store).await;
+    assert_eq!(setup.calls.delete.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn test_sync_try_load_mut_fails_when_not_cached() {
+    let setup = setup(1); // Cache size 1
+    let data_a = TestData {
+        id: 730,
+        content: "Sync Try Mut Evicted A".to_string(),
+    };
+    let data_b = TestData {
+        id: 731,
+        content: "Sync Try Mut Evictor B".to_string(),
+    };
+
+    // --- Setup: Insert A, write A, evict A ---
+    let mut item_a = setup.pool.insert(data_a.clone());
+    let original_key_a = item_a.key();
+    let write_handle = item_a.spawn_write_now();
+    write_handle.await.unwrap(); // A is in temp store
+    let _arc_b = setup.pool.insert(data_b.clone()); // Evict A
+    wait_for_store(&setup.backing_store).await;
+    let initial_delete_count = setup.calls.delete.load(Ordering::SeqCst);
+    assert_eq!(setup.calls.load.load(Ordering::SeqCst), 0); // No loads yet
+
+    // --- Action: Call sync try_load_mut() on evicted item ---
+    let maybe_guard = item_a.try_load_mut();
+
+    // --- Verification ---
+    assert!(maybe_guard.is_none()); // Expect failure (None) because not cached
+    drop(maybe_guard);
+    assert_eq!(item_a.key(), original_key_a); // Key should not change
+    // load: 0 (try_load_mut doesn't load)
+    // delete: 0 (No delete occurred)
+    assert_eq!(setup.calls.load.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        setup.calls.delete.load(Ordering::SeqCst),
+        initial_delete_count
+    );
+
+    // Cleanup
+    drop(item_a); // A was stored, delete should happen
+    wait_for_store(&setup.backing_store).await;
+    assert!(setup.calls.delete.load(Ordering::SeqCst) >= initial_delete_count + 1);
+}

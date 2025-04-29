@@ -122,7 +122,7 @@ impl<T, B: BackingStoreT> FBPool<T, B> {
     /// The data is initially placed only in the in-memory LRU cache. It will only be
     /// written to the backing store's temporary location if it's evicted from the cache
     /// or explicitly written via`persist`/`blocking_persist`/`spawn_write_now`/`blocking_write_now`.
-    /// 
+    ///
     /// Whenever the data is evicted from memory, after being written to the backing store
     /// with `B::store`, the data will be dropped normally, which means if there's a custom `Drop`
     /// implementation, it will be called. Each time the data is loaded back into memory, this
@@ -227,11 +227,24 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FBItem<T, B> {
         // Construct before loading so that if cancelled, the object will be dumped
         // if necessary (possible if a lot of things are loaded simultaneously).
         let on_drop = GuardDropper::new(&self.inner.pool, self.inner.index);
-        let data_guard = self.entry.load_async(&self.inner.pool.store).await;
+        let data_guard = self.entry.load(&self.inner.pool.store).await;
         ReadGuard {
             data_guard,
             _on_drop: on_drop,
         }
+    }
+
+    /// Attempts to load the data and return a read guard, returning None if the data is not
+    /// already in memory or is currently being evicted from memory.
+    /// The entry will only be potentially shifted in the LRU cache on success.
+    pub fn try_load(&self) -> Option<ReadGuard<T, B>> {
+        let guard = self.entry.try_load()?;
+        shift_forward(&self.inner.pool, self.inner.index);
+        let on_drop = GuardDropper::new(&self.inner.pool, self.inner.index);
+        Some(ReadGuard {
+            data_guard: guard,
+            _on_drop: on_drop,
+        })
     }
 
     /// Loads the data and returns a read guard, performing blocking I/O if necessary.
@@ -262,7 +275,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FBItem<T, B> {
     /// blocking function nested many blocking calls deep within an async task running
     /// on a tokio multithreaded runtime. Ideally you would propagate async down and use
     /// `load` instead.
-    /// 
+    ///
     /// # Panics
     /// This method will panic if called from within a `tokio::runtime::Runtime`
     /// created using `Runtime::new_current_thread`, as `block_in_place` is not
@@ -271,7 +284,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FBItem<T, B> {
     pub fn load_in_place(&self) -> ReadGuard<T, B> {
         shift_forward(&self.inner.pool, self.inner.index);
         let on_drop = GuardDropper::new(&self.inner.pool, self.inner.index);
-        let data_guard = self.entry.load(&self.inner.pool.store);
+        let data_guard = self.entry.load_in_place(&self.inner.pool.store);
         ReadGuard {
             data_guard,
             _on_drop: on_drop,
@@ -298,6 +311,19 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FBItem<T, B> {
             data_guard,
             _on_drop: on_drop,
         }
+    }
+
+    /// Attempts to load the data and return a write guard, returning None if the data is not
+    /// already in memory or is currently being evicted from memory.
+    /// The entry will only be potentially shifted in the LRU cache on success.
+    pub fn try_load_mut(&mut self) -> Option<WriteGuard<T, B>> {
+        let guard = self.entry.try_load_mut()?;
+        shift_forward(&self.inner.pool, self.inner.index);
+        let on_drop = GuardDropper::new(&self.inner.pool, self.inner.index);
+        Some(WriteGuard {
+            data_guard: guard,
+            _on_drop: on_drop,
+        })
     }
 
     /// Blocking version of `load_mut`. Waits for the operation to complete.

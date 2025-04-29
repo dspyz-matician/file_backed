@@ -27,7 +27,7 @@ struct EntryMetadata {
     // There's one place where we read the key that isn't guarded by the `backing` RwLock
     // lock (`FullEntry::key`) and a separate place where we read/write the key without
     // having the corresponding correct reference (&self, &mut self) to the FullEntry
-    // (`LimitedEntry::try_dump_to_disk`). These only both only grab read guards, not write 
+    // (`LimitedEntry::try_dump_to_disk`). These only both only grab read guards, not write
     // guards, so they won't contend with themselves or each other. For all other pairings,
     // we're either guaranteed to avoid contention by already holding the backing lock guard
     // or by rust's borrow checker or both. So we can safely use `try_read`/`try_write` and
@@ -121,17 +121,8 @@ impl<T, B: BackingStoreT> FullEntry<T, B> {
 }
 
 impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
-    pub(super) fn load(&self, store: &Arc<BackingStore<B>>) -> RwLockReadGuard<T> {
-        if let Ok(read_guard) = self.backing.try_read() {
-            if read_guard.memory.is_some() {
-                return RwLockReadGuard::map(read_guard, |b| b.memory.as_ref().unwrap());
-            }
-        }
-        tokio::task::block_in_place(|| self.blocking_load(store))
-    }
-
     /// If aborted, the backing value may or may not have been loaded into memory.
-    pub(super) async fn load_async(&self, store: &Arc<BackingStore<B>>) -> RwLockReadGuard<T> {
+    pub(super) async fn load(&self, store: &Arc<BackingStore<B>>) -> RwLockReadGuard<T> {
         let guard = loop {
             let read_guard = self.backing.read().await;
             if read_guard.memory.is_some() {
@@ -159,6 +150,14 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
                 .unwrap();
         };
         RwLockReadGuard::map(guard, |b| b.memory.as_ref().unwrap())
+    }
+
+    /// Returns None if the backing value is not in memory or is currently being
+    /// evicted from memory.
+    pub(super) fn try_load(&self) -> Option<RwLockReadGuard<'_, T>> {
+        let guard = self.backing.try_read().ok()?;
+        guard.memory.as_ref()?;
+        Some(RwLockReadGuard::map(guard, |b| b.memory.as_ref().unwrap()))
     }
 
     pub(super) fn blocking_load(&self, store: &BackingStore<B>) -> RwLockReadGuard<T> {
@@ -189,6 +188,13 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
         RwLockReadGuard::map(guard, |b| b.memory.as_ref().unwrap())
     }
 
+    pub(super) fn load_in_place(&self, store: &Arc<BackingStore<B>>) -> RwLockReadGuard<T> {
+        match self.try_load() {
+            Some(value) => value,
+            None => tokio::task::block_in_place(|| self.blocking_load(store)),
+        }
+    }
+
     /// If aborted, the backing value may or may not have been loaded into memory.
     pub(super) async fn load_mut(
         &mut self, // &mut necessary to avoid possibility of deadlock
@@ -216,6 +222,17 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
         guard.stored.take();
         *self.meta.key.try_write().unwrap() = Uuid::new_v4();
         RwLockWriteGuard::map(guard, |b| b.memory.as_mut().unwrap())
+    }
+
+    /// Returns None if the backing value is not in memory or is currently being
+    /// evicted from memory.
+    // &mut necessary to avoid possibility of deadlock
+    pub(super) fn try_load_mut(&mut self) -> Option<RwLockMappedWriteGuard<T>> {
+        let mut guard = self.backing.try_write().ok()?;
+        guard.memory.as_ref()?;
+        guard.stored.take();
+        *self.meta.key.try_write().unwrap() = Uuid::new_v4();
+        Some(RwLockWriteGuard::map(guard, |b| b.memory.as_mut().unwrap()))
     }
 
     pub(super) fn blocking_load_mut(
