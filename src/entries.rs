@@ -135,9 +135,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
                 () = notified => continue,
                 guard = Arc::clone(&self.backing).write_owned() => guard,
             };
-            if write_guard.memory.is_some() {
-                continue;
-            }
+            assert!(write_guard.memory.is_none());
             let store_clone = Arc::clone(store);
             let meta = Arc::clone(&self.meta);
             store
@@ -178,11 +176,10 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
             let Some(mut write_guard) = write_guard else {
                 continue;
             };
-            if write_guard.memory.is_none() {
-                let data = store.load(write_guard.stored.get().unwrap());
-                write_guard.memory = Some(data);
-                self.meta.in_memory.notify_waiters();
-            }
+            assert!(write_guard.memory.is_none());
+            let data = store.load(write_guard.stored.get().unwrap());
+            write_guard.memory = Some(data);
+            self.meta.in_memory.notify_waiters();
             break write_guard.downgrade();
         };
         RwLockReadGuard::map(guard, |b| b.memory.as_ref().unwrap())
