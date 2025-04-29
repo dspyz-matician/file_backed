@@ -2164,3 +2164,151 @@ async fn test_sync_try_load_mut_fails_when_not_cached() {
     wait_for_store(&setup.backing_store).await;
     assert!(setup.calls.delete.load(Ordering::SeqCst) >= initial_delete_count + 1);
 }
+
+#[tokio::test]
+async fn test_register_same_persisted_key_twice() {
+    let setup = setup(10); // Cache size doesn't matter much here
+    let path = test_path_a();
+    let key = Uuid::new_v4();
+    let data = TestData {
+        id: 800,
+        content: "Register Twice".to_string(),
+    };
+
+    // --- Setup: Simulate item already persisted ---
+    setup.store_impl._add_persisted(&path, key, data.clone());
+    assert!(setup.store_impl.get_persisted_keys(&path).contains(&key));
+    assert!(setup.store_impl.get_temp_keys().contains(&key)); // For loading later
+    setup.calls.store.store(0, Ordering::SeqCst); // Reset calls
+
+    // --- Action: Track Path ---
+    let tracked_path = setup.backing_store.track_path(path.clone()).await.unwrap();
+    let tracked_path = Arc::new(tracked_path);
+    assert!(tracked_path.all_keys().contains(&key));
+    setup.calls.register.store(0, Ordering::SeqCst); // Reset register count specifically
+
+    // --- Action: Register key for the first time (async) ---
+    let maybe_item1 = setup.pool.register(&tracked_path, key).await;
+    assert!(maybe_item1.is_some());
+    let item1 = maybe_item1.unwrap();
+
+    // --- Verification 1 ---
+    assert_eq!(item1.key(), key);
+    assert_eq!(setup.calls.register.load(Ordering::SeqCst), 1);
+    assert_eq!(setup.calls.load.load(Ordering::SeqCst), 0); // Register doesn't load
+
+    // --- Action: Register same key for the second time (async) ---
+    let maybe_item2 = setup.pool.register(&tracked_path, key).await;
+    assert!(maybe_item2.is_some());
+    let item2 = maybe_item2.unwrap();
+
+    // --- Verification 2 ---
+    assert_eq!(item2.key(), key);
+    // BackingStoreT::register only called once.
+    assert_eq!(setup.calls.register.load(Ordering::SeqCst), 1);
+    assert_eq!(setup.calls.load.load(Ordering::SeqCst), 0); // Still no loads
+
+    // --- Verification 3: Distinct Items, Equal Keys ---
+    assert_eq!(item1.key(), item2.key());
+
+    // --- Verification 4: Loading yields equal data but requires separate loads ---
+    // Load item1
+    let guard1 = item1.load().await;
+    assert_eq!(*guard1, data);
+    assert_eq!(setup.calls.load.load(Ordering::SeqCst), 1); // First load occurred
+    drop(guard1);
+
+    // Load item2
+    let guard2 = item2.load().await;
+    assert_eq!(*guard2, data);
+    // Load count should increase again, as item2 is a distinct entry
+    assert_eq!(setup.calls.load.load(Ordering::SeqCst), 2); // Second load occurred
+    drop(guard2);
+
+    assert_eq!(setup.calls.delete.load(Ordering::SeqCst), 0); // No deletes yet
+
+    // --- Action: Drop first Arc ---
+    drop(item1);
+    wait_for_store(&setup.backing_store).await;
+    // --- Verification 5 ---
+    // Delete should NOT have happened yet, as item2 still holds a reference managed by the pool
+    assert_eq!(setup.calls.delete.load(Ordering::SeqCst), 0);
+
+    // --- Action: Drop second Arc ---
+    drop(item2);
+    wait_for_store(&setup.backing_store).await;
+    // --- Verification 6 ---
+    // Now the last reference managed by the pool is gone, delete should occur
+    assert_eq!(setup.calls.delete.load(Ordering::SeqCst), 1);
+    assert!(!setup.store_impl.get_temp_keys().contains(&key)); // Temp deleted
+
+    // Cleanup persisted state
+    let cleanup_handle = tokio::task::spawn_blocking({
+        let store = setup.backing_store.clone();
+        let tracked_clone = tracked_path.clone();
+        move || store.blocking_delete_persisted(&tracked_clone, key)
+    });
+    cleanup_handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn test_blocking_register_same_persisted_key_twice() {
+    // Similar test using the blocking variants
+    let setup = setup(10);
+    let path = test_path_b(); // Use different path
+    let key = Uuid::new_v4();
+    let data = TestData {
+        id: 801,
+        content: "Blocking Register Twice".to_string(),
+    };
+
+    setup.store_impl._add_persisted(&path, key, data.clone());
+    setup.calls.store.store(0, Ordering::SeqCst);
+
+    let tracked_path = Arc::new(setup.backing_store.blocking_track_path(path.clone()));
+    assert!(tracked_path.all_keys().contains(&key));
+    setup.calls.register.store(0, Ordering::SeqCst);
+
+    // --- Action: Register key for the first time (blocking) ---
+    let register1_handle = tokio::task::spawn_blocking({
+        let p = setup.pool.clone();
+        let t = tracked_path.clone();
+        move || p.blocking_register(&t, key)
+    });
+    let item1 = register1_handle.await.unwrap().unwrap(); // Unwrap JoinError and Option
+
+    assert_eq!(setup.calls.register.load(Ordering::SeqCst), 1);
+
+    // --- Action: Register same key for the second time (blocking) ---
+    let register2_handle = tokio::task::spawn_blocking({
+        let p = setup.pool.clone();
+        let t = tracked_path.clone();
+        move || p.blocking_register(&t, key)
+    });
+    let item2 = register2_handle.await.unwrap().unwrap(); // Unwrap JoinError and Option
+
+    assert_eq!(setup.calls.register.load(Ordering::SeqCst), 1);
+
+    // --- Verification: Distinct Arcs ---
+    assert_eq!(item1.key(), item2.key());
+
+    // --- Verification: Loading (use blocking load) ---
+    let load1_handle = tokio::task::spawn_blocking(move || item1.blocking_load().clone());
+    assert_eq!(load1_handle.await.unwrap(), data);
+    assert_eq!(setup.calls.load.load(Ordering::SeqCst), 1);
+
+    let load2_handle = tokio::task::spawn_blocking(move || item2.blocking_load().clone());
+    assert_eq!(load2_handle.await.unwrap(), data);
+    assert_eq!(setup.calls.load.load(Ordering::SeqCst), 2); // Separate load needed
+
+    // --- Cleanup ---
+    wait_for_store(&setup.backing_store).await;
+    assert_eq!(setup.calls.delete.load(Ordering::SeqCst), 1); // Now deleted
+
+    let cleanup_handle = tokio::task::spawn_blocking({
+        let store = setup.backing_store.clone();
+        let t = tracked_path.clone();
+        move || store.blocking_delete_persisted(&t, key)
+    });
+    cleanup_handle.await.unwrap();
+}
