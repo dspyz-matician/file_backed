@@ -212,9 +212,9 @@ dependencies = [
 
 [[package]]
 name = "get_mut_drop_weak"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "87243aac4c993c2e635b7a5659c36535efa402e113a6ddec2647ed15cbc383d5"
+checksum = "be51979c7790cde76ff7d158b5150b85150772414440e325e07280b0ec501dcc"
 
 [[package]]
 name = "getrandom"
