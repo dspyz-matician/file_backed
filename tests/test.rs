@@ -484,7 +484,7 @@ async fn test_persist_triggers_store_if_not_written_noop_if_done() {
     assert!(!tracked_path.all_keys().contains(&key));
 
     // --- Action: Persist (first time, not written yet, not persisted yet) ---
-    let persist_handle = arc.spawn_persist(tracked_path.clone());
+    let persist_handle = arc.spawn_persist(&tracked_path);
     persist_handle.await.unwrap();
     // --- Verification ---
     // store: 1 (Writes to temp first)
@@ -506,7 +506,7 @@ async fn test_persist_triggers_store_if_not_written_noop_if_done() {
     // checks the TrackedPath passed in. Let's assume it checks the path.
 
     // --- Action: Persist Again (already written to temp, *and* already persisted at path) ---
-    let persist_handle2 = arc.spawn_persist(tracked_path.clone()); // Use same tracked_path
+    let persist_handle2 = arc.spawn_persist(&tracked_path); // Use same tracked_path
     persist_handle2.await.unwrap();
     // --- Verification ---
     // store: 1 (No new store call needed)
@@ -576,7 +576,7 @@ async fn test_persist_is_noop_if_already_persisted() {
     setup.calls.register.store(0, Ordering::SeqCst); // Reset this too
 
     // --- Action: Persist (item is already known persisted at this path) ---
-    let persist_handle = arc.spawn_persist(tracked_path.clone());
+    let persist_handle = arc.spawn_persist(&tracked_path);
     persist_handle.await.unwrap();
 
     // --- Verification ---
@@ -2099,7 +2099,7 @@ async fn test_sync_try_load_mut_success_when_cached() {
     // load: 0 (No load needed, was cached)
     // delete: 1 (Original temp file deleted)
     wait_for_store(&setup.backing_store).await; // Wait for delete task
-    assert_eq!(setup.calls.load.load(Ordering::SeqCst), 0);    
+    assert_eq!(setup.calls.load.load(Ordering::SeqCst), 0);
     assert_eq!(setup.calls.delete.load(Ordering::SeqCst), 1);
     assert!(!setup.store_impl.get_temp_keys().contains(&original_key_a)); // Original temp gone
 

@@ -275,8 +275,9 @@ impl<B: BackingStoreT> BackingStore<B> {
     /// Asynchronously triggers the underlying `BackingStoreT::sync_persisted`
     /// operation for the given `tracked` path.
     /// Returns a `JoinHandle` that completes when the sync operation is done.
-    pub fn sync(self: &Arc<Self>, tracked: Arc<TrackedPath<B::PersistPath>>) -> JoinHandle<()> {
+    pub fn sync(self: &Arc<Self>, tracked: &Arc<TrackedPath<B::PersistPath>>) -> JoinHandle<()> {
         let this = Arc::clone(self);
+        let tracked = Arc::clone(tracked);
         self.spawn_blocking(move || this.blocking_sync(tracked.path()))
     }
 
@@ -291,10 +292,11 @@ impl<B: BackingStoreT> BackingStore<B> {
     /// Returns a `JoinHandle` that completes when the deletion is done.
     pub fn delete_persisted(
         self: &Arc<Self>,
-        tracked: Arc<TrackedPath<B::PersistPath>>,
+        tracked: &Arc<TrackedPath<B::PersistPath>>,
         key: Uuid,
     ) -> JoinHandle<()> {
         let this = Arc::clone(self);
+        let tracked = Arc::clone(tracked);
         self.spawn_blocking(move || this.blocking_delete_persisted(&tracked, key))
     }
 

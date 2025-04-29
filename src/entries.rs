@@ -267,11 +267,12 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
     pub(super) fn spawn_persist(
         &self,
         store: &Arc<BackingStore<B>>,
-        path: Arc<TrackedPath<B::PersistPath>>,
+        path: &Arc<TrackedPath<B::PersistPath>>,
     ) -> JoinHandle<()> {
         let backing = Arc::clone(&self.backing);
         let meta = Arc::clone(&self.meta);
         let store_clone = Arc::clone(store);
+        let path = Arc::clone(path);
         store.spawn_blocking(move || {
             blocking_persist(&backing, &store_clone, &meta, &path);
         })

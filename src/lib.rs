@@ -361,7 +361,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FBItem<T, B> {
     /// location first before attempting persistence.
     /// If the data is already in the persistent location, this is a no-op.
     /// Returns a `JoinHandle` that completes when the persistence operation finishes.
-    pub fn spawn_persist(&self, path: Arc<TrackedPath<B::PersistPath>>) -> JoinHandle<()> {
+    pub fn spawn_persist(&self, path: &Arc<TrackedPath<B::PersistPath>>) -> JoinHandle<()> {
         self.entry.spawn_persist(&self.inner.pool.store, path)
     }
 

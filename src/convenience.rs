@@ -140,7 +140,7 @@ pub fn blocking_save_with<B: BackingStoreT, R, E>(
     let runtime = store.runtime_handle();
     runtime.block_on(async move {
         let _: Vec<()> = persister.join_set.join_all().await;
-        store.sync(Arc::clone(tracked)).await.unwrap();
+        store.sync(tracked).await.unwrap();
     });
     let output = change_key()?;
     assert!(max_simultaneous_tasks > 0);
