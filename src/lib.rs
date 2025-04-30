@@ -81,12 +81,12 @@ impl<T, B: BackingStoreT> Drop for FbInner<T, B> {
 /// This approach aims to provide LRU-like behavior while optimizing for workloads
 /// where a subset of items is accessed very frequently.
 /// 
-/// Note that internally, we store each item in something like an
-/// `Arc<RwLock<Option<T>>>`, where the Option is `None` when the item is evicted
-/// from memory. This means that if `T` takes up space _on stack_ (such as with
-/// a large fixed-size array), "evicting" it from memroy will not free any space.
-/// In that case, you should use a `Box<T>` as your `T` type so that the memory
-/// is actually freed when the item is evicted.
+/// Internally, we store each item in an `Option<T>`. When an item is evicted from cache,
+/// we will replace `Some(val)` with None. Note that the size of `None::<T>`` on the
+/// stack is the exact same as that of Some(val). What this means is that if T's resources
+/// are primarily represented by its space on the stack (e.g. when `T` is `[f32; 4096]`),
+/// there will be zero savings when it's removed from cache. In these cases, you should
+/// use Box<T> instead.
 pub struct FBPool<T, B: BackingStoreT> {
     entries: RwLock<CutoffList<LimitedEntry<T, B>>>,
     store: Arc<BackingStore<B>>,
@@ -228,7 +228,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> Fb<T, B> {
     }
 
     /// Attempts to load the data and return a read guard, returning None if the data is not
-    /// already in memory or is currently being evicted from memory.
+    /// already in memory or is currently being evicted.
     /// The entry will only be potentially shifted in the LRU cache on success.
     pub fn try_load(&self) -> Option<ReadGuard<T, B>> {
         let guard = self.entry.try_load()?;
@@ -307,7 +307,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> Fb<T, B> {
     }
 
     /// Attempts to load the data and return a write guard, returning None if the data is not
-    /// already in memory or is currently being evicted from memory.
+    /// already in memory or is currently being evicted.
     /// The entry will only be potentially shifted in the LRU cache on success.
     pub fn try_load_mut(&mut self) -> Option<WriteGuard<T, B>> {
         let guard = self.entry.try_load_mut()?;
@@ -394,7 +394,7 @@ fn shift_forward<T: Send + Sync + 'static, B: Strategy<T>>(
 /// An RAII guard providing immutable access (`Deref`) to the underlying data `T`.
 ///
 /// While this guard is alive, the data is guaranteed to remain loaded in memory
-/// and will not be evicted from memory even if it leaves the LRU cache.
+/// and will not be immediately evicted if it leaves the LRU cache.
 // Field ordering is important for try_dump_to_disk to succeed on drop
 pub struct ReadGuard<'a, T: Send + Sync + 'static, B: Strategy<T>> {
     data_guard: RwLockReadGuard<'a, T>,
