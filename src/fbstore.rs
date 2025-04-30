@@ -90,7 +90,7 @@ impl<T: Default + prost::Message> Codec<T> for ProstCodec {
 /// This involves creating sharding subdirectories (`00` through `ff`)
 /// and storing a list of filenames to ignore when scanning for keys.
 /// It dereferences to [`std::path::Path`].
-/// 
+///
 /// We expect to have exclusive access to this directory. If another
 /// process interacts with it, or if the caller modifies files in the
 /// directory directly (besides those which are explicitly ignored), all bets are off.
@@ -115,7 +115,7 @@ impl PreparedPath {
     /// We expect to have exclusive access to this directory. If another
     /// process interacts with it, or if the caller modifies files in the
     /// directory directly (besides those which are explicitly ignored), all bets are off.
-    /// 
+    ///
     /// # Panics
     /// Panics if any required directory cannot be created.
     pub async fn new(path: PathBuf, ignored: Vec<&'static str>) -> Self {

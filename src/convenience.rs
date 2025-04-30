@@ -5,9 +5,9 @@ use tokio::task::JoinSet;
 use uuid::Uuid;
 
 use crate::backing_store::{BackingStore, BackingStoreT, Strategy, TrackedPath};
-use crate::{FBItem, WriteGuard};
+use crate::{Fb, WriteGuard};
 
-impl<T: Send + Sync + 'static, B: Strategy<T>> FBItem<T, B> {
+impl<T: Send + Sync + 'static, B: Strategy<T>> Fb<T, B> {
     /// Asynchronously ensures unique access to the data, returning a `WriteGuard`.
     ///
     /// If this `Arc` is not the unique reference (`full_count() > 1`), the underlying
@@ -51,10 +51,10 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FBItem<T, B> {
     }
 }
 
-/// Atomically persists a collection of `Arc<FBItem>`s and updates an external key/state.
+/// Atomically persists a collection of `Arc<Fb>`s and updates an external key/state.
 ///
 /// This convenience function handles the pattern of:
-/// 1. Persisting multiple `FBItem` items to a `tracked` path (potentially in parallel).
+/// 1. Persisting multiple `Fb` items to a `tracked` path (potentially in parallel).
 /// 2. Ensuring the `tracked` path is synced to disk.
 /// 3. Calling `change_key` (which should atomically update some external state, like a
 ///    master key reference file).
@@ -64,7 +64,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FBItem<T, B> {
 ///
 /// # Arguments
 /// * `store`: The `BackingStore` manager.
-/// * `arcs`: An iterator providing the `Arc<FBItem>` handles to persist.
+/// * `arcs`: An iterator providing the `Arc<Fb>` handles to persist.
 /// * `tracked`: The target persistent path information.
 /// * `max_simultaneous_tasks`: Controls the parallelism of the persist operations.
 /// * `change_key`: A closure executed *after* all persists succeed but *before* cleanup.
@@ -74,7 +74,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FBItem<T, B> {
 /// Returns `Ok(R)` if all persists and `change_key` succeed, otherwise returns `Err(E)`.
 pub fn blocking_save<T: Send + Sync + 'static, B: Strategy<T>, R, E>(
     store: &Arc<BackingStore<B>>,
-    arcs: impl IntoIterator<Item = Arc<FBItem<T, B>>>,
+    arcs: impl IntoIterator<Item = Arc<Fb<T, B>>>,
     tracked: &Arc<TrackedPath<B::PersistPath>>,
     max_simultaneous_tasks: usize,
     change_key: impl FnOnce() -> Result<R, E>,
@@ -97,7 +97,7 @@ pub fn blocking_save<T: Send + Sync + 'static, B: Strategy<T>, R, E>(
 ///
 /// Similar to `blocking_save`, this handles atomically persisting items and updating state.
 /// Instead of an iterator of arcs, it takes a closure `persist_arcs` which receives a
-/// mutable `Persister`. The closure should call `Persister::persist` for each `FBItem`
+/// mutable `Persister`. The closure should call `Persister::persist` for each `Fb`
 /// that needs to be included in this save operation.
 ///
 /// This allows for more complex scenarios where the set of items to persist might
@@ -174,7 +174,7 @@ pub fn blocking_save_with<B: BackingStoreT, R, E>(
 }
 
 /// A helper struct used within the `persist_arcs` closure of `blocking_save_with`.
-/// It collects the `Arc<FBItem>` handles that need to be persisted.
+/// It collects the `Arc<Fb>` handles that need to be persisted.
 pub struct Persister<B: BackingStoreT> {
     backing_store: Arc<BackingStore<B>>,
     tracked: Arc<TrackedPath<B::PersistPath>>,
@@ -184,8 +184,8 @@ pub struct Persister<B: BackingStoreT> {
 }
 
 impl<B: BackingStoreT> Persister<B> {
-    /// Registers an `Arc<FBItem>` to be persisted as part of the `blocking_save_with` operation.
-    pub fn persist<T: Send + Sync + 'static>(&mut self, arc: &Arc<FBItem<T, B>>)
+    /// Registers an `Arc<Fb>` to be persisted as part of the `blocking_save_with` operation.
+    pub fn persist<T: Send + Sync + 'static>(&mut self, arc: &Arc<Fb<T, B>>)
     where
         B: Strategy<T>,
     {

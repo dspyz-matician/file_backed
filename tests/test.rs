@@ -12,7 +12,7 @@ use dashmap::{DashMap, DashSet};
 use uuid::Uuid;
 
 use file_backed::backing_store::{BackingStore, BackingStoreT, Strategy};
-use file_backed::{FBItem, FBPool, convenience::blocking_save};
+use file_backed::{FBPool, Fb, convenience::blocking_save};
 
 // Simple clonable data structure for testing
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1261,7 +1261,7 @@ async fn test_blocking_save_more_items_than_max_simultaneous() {
             content: format!("Item {}", i),
         })
         .collect();
-    let arcs: Vec<Arc<FBItem<TestData, Arc<TestStore>>>> = items
+    let arcs: Vec<Arc<Fb<TestData, Arc<TestStore>>>> = items
         .iter()
         .map(|d| Arc::new(setup.pool.insert(d.clone())))
         .collect();
@@ -1546,7 +1546,7 @@ async fn test_blocking_try_load_mut_success() {
 
     // --- Action: blocking_try_load_mut ---
     let mutate_handle = tokio::task::spawn_blocking(move || {
-        let maybe_guard = Arc::get_mut(&mut arc).map(FBItem::blocking_load_mut);
+        let maybe_guard = Arc::get_mut(&mut arc).map(Fb::blocking_load_mut);
         assert!(maybe_guard.is_some());
         let mut guard = maybe_guard.unwrap();
         guard.content = "mutated_blocking".to_string();

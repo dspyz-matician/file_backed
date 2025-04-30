@@ -39,17 +39,17 @@ pub use self::backing_store::{BackingStore, BackingStoreT};
 ///   task is spawned via the `BackingStore` to delete it using `BackingStoreT::delete`.
 // Field ordering is important to remove entries from the cutoff list when
 // the last reference to the entry is dropped
-pub struct FBItem<T, B: BackingStoreT> {
+pub struct Fb<T, B: BackingStoreT> {
     entry: FullEntry<T, B>,
-    inner: FBItemInner<T, B>,
+    inner: FbInner<T, B>,
 }
 
-struct FBItemInner<T, B: BackingStoreT> {
+struct FbInner<T, B: BackingStoreT> {
     index: cutoff_list::Index,
     pool: Arc<FBPool<T, B>>,
 }
 
-impl<T, B: BackingStoreT> Drop for FBItemInner<T, B> {
+impl<T, B: BackingStoreT> Drop for FbInner<T, B> {
     fn drop(&mut self) {
         let mut write_guard = self.pool.entries.write();
         let limited = write_guard.remove(self.index).unwrap();
@@ -57,7 +57,7 @@ impl<T, B: BackingStoreT> Drop for FBItemInner<T, B> {
     }
 }
 
-/// Manages a pool of `FBItem` instances, backed by an in-memory cache
+/// Manages a pool of `Fb` instances, backed by an in-memory cache
 /// and a `BackingStore` for disk persistence.
 ///
 /// ## Caching Strategy (Segmented LRU Variant)
@@ -80,7 +80,13 @@ impl<T, B: BackingStoreT> Drop for FBItemInner<T, B> {
 ///
 /// This approach aims to provide LRU-like behavior while optimizing for workloads
 /// where a subset of items is accessed very frequently.
-///
+/// 
+/// Note that internally, we store each item in something like an
+/// `Arc<RwLock<Option<T>>>`, where the Option is `None` when the item is evicted
+/// from memory. This means that if `T` takes up space _on stack_ (such as with
+/// a large fixed-size array), "evicting" it from memroy will not free any space.
+/// In that case, you should use a `Box<T>` as your `T` type so that the memory
+/// is actually freed when the item is evicted.
 pub struct FBPool<T, B: BackingStoreT> {
     entries: RwLock<CutoffList<LimitedEntry<T, B>>>,
     store: Arc<BackingStore<B>>,
@@ -104,7 +110,7 @@ impl<T, B: BackingStoreT> FBPool<T, B> {
         &self.store
     }
 
-    /// Inserts new `data` into the pool, returning an `FBItem` handle.
+    /// Inserts new `data` into the pool, returning an `Fb` handle.
     ///
     /// The data is initially placed only in the in-memory LRU cache. It will only be
     /// written to the backing store's temporary location if it's evicted from the cache
@@ -114,7 +120,7 @@ impl<T, B: BackingStoreT> FBPool<T, B> {
     /// with `B::store`, the data will be dropped normally, which means if there's a custom `Drop`
     /// implementation, it will be called. Each time the data is loaded back into memory, this
     /// could happen again if the data is evicted again.
-    pub fn insert(self: &Arc<Self>, data: T) -> FBItem<T, B>
+    pub fn insert(self: &Arc<Self>, data: T) -> Fb<T, B>
     where
         T: Send + Sync + 'static,
         B: Strategy<T>,
@@ -127,9 +133,9 @@ impl<T, B: BackingStoreT> FBPool<T, B> {
             entry.try_dump_to_disk(&self.store);
         }
         drop(guard);
-        FBItem {
+        Fb {
             entry,
-            inner: FBItemInner {
+            inner: FbInner {
                 index,
                 pool: Arc::clone(self),
             },
@@ -138,7 +144,7 @@ impl<T, B: BackingStoreT> FBPool<T, B> {
 
     /// Asynchronously registers an existing item from a persistent path into the pool.
     ///
-    /// Creates an `FBItem` handle for an item identified by `key` located at the
+    /// Creates an `Fb` handle for an item identified by `key` located at the
     /// tracked persistent `path`. This typically involves calling `BackingStoreT::register`
     /// (e.g., hard-linking the file into the managed temporary area).
     ///
@@ -148,15 +154,15 @@ impl<T, B: BackingStoreT> FBPool<T, B> {
         self: &Arc<Self>,
         path: &Arc<TrackedPath<B::PersistPath>>,
         key: Uuid,
-    ) -> Option<FBItem<T, B>>
+    ) -> Option<Fb<T, B>>
     where
         T: Send + Sync + 'static,
     {
         let entry = FullEntry::register(key, &self.store, path).await?;
         let index = self.entries.write().insert_last(entry.limited());
-        Some(FBItem {
+        Some(Fb {
             entry,
-            inner: FBItemInner {
+            inner: FbInner {
                 index,
                 pool: Arc::clone(self),
             },
@@ -169,12 +175,12 @@ impl<T, B: BackingStoreT> FBPool<T, B> {
         self: &Arc<Self>,
         path: &TrackedPath<B::PersistPath>,
         key: Uuid,
-    ) -> Option<FBItem<T, B>> {
+    ) -> Option<Fb<T, B>> {
         let entry = FullEntry::blocking_register(key, &self.store, path)?;
         let index = self.entries.write().insert_last(entry.limited());
-        Some(FBItem {
+        Some(Fb {
             entry,
-            inner: FBItemInner {
+            inner: FbInner {
                 index,
                 pool: Arc::clone(self),
             },
@@ -187,20 +193,20 @@ impl<T, B: BackingStoreT> FBPool<T, B> {
     }
 }
 
-impl<T, B: BackingStoreT> FBItem<T, B> {
+impl<T, B: BackingStoreT> Fb<T, B> {
     /// Returns the unique identifier (`Uuid`) for the data associated with this handle.
     /// This key will change if the data is mutated via `try_load_mut` or `make_mut`.
     pub fn key(&self) -> Uuid {
         self.entry.key()
     }
 
-    /// Returns a reference to the `FBPool` this `FBItem` belongs to.
+    /// Returns a reference to the `FBPool` this `Fb` belongs to.
     pub fn pool(&self) -> &Arc<FBPool<T, B>> {
         &self.inner.pool
     }
 }
 
-impl<T: Send + Sync + 'static, B: Strategy<T>> FBItem<T, B> {
+impl<T: Send + Sync + 'static, B: Strategy<T>> Fb<T, B> {
     /// Asynchronously loads the data and returns a read guard.
     ///
     /// Returns a `Future` that resolves to a `ReadGuard` once the data is available

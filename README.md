@@ -3,19 +3,18 @@ Provides types for managing collections of large objects, using an in-memory LRU
 
 ## Overview
 
-This crate provides `FBPool` and `FBArc` (File-Backed Arc) to manage data (`T`) that might be too large or numerous to keep entirely in memory. It uses a strategy similar to a swap partition:
+This crate provides `FBPool` and `Fb` (File-Backed item) to manage data (`T`) that might be too large or numerous to keep entirely in memory. It uses a strategy similar to a swap partition:
 
 1.  **In-Memory Cache:** An LRU cache (`FBPool`) keeps frequently/recently used items readily available in memory.
 2.  **Backing Store:** When items are evicted from the cache, or when explicitly requested, they are serialized and written to a temporary location in a backing store (like disk).
-3.  **Lazy Loading:** When an item not in the cache is accessed via its `FBArc` handle (`.load()`, `.load_async()`, etc.), it's automatically read back from the backing store.
-4.  **Reference Counting:** `FBArc` acts like `std::sync::Arc`, tracking references.
-5.  **Automatic Cleanup:** When the last `FBArc` for an item is dropped, its corresponding data in the *temporary* backing store is automatically deleted via a background task.
-6.  **Persistence:** Items can be explicitly "persisted" (e.g., hard-linked) to a separate, permanent location and later "registered" back into a pool, allowing data to survive application restarts.
+3.  **Lazy Loading:** When an item not in the cache is accessed via its `Fb` handle (`.load()`, `.load_async()`, etc.), it's automatically read back from the backing store.
+4.  **Automatic Cleanup:** When an `Fb` for an item is dropped, its corresponding data in the *temporary* backing store is automatically deleted via a background task.
+5.  **Persistence:** Items can be explicitly "persisted" (e.g., hard-linked) to a separate, permanent location and later "registered" back into a pool, allowing data to survive application restarts.
 
 ## Core Components
 
 * **`FBPool<T, B>`:** Manages the collection, including the LRU cache and interaction with the backing store.
-* **`FBArc<T, B>`:** A smart pointer (like `Arc`) to an item managed by the pool. Access requires calling a `.load()` variant.
+* **`Fb<T, B>`:** A container for an item managed by the pool. Access requires calling a `.load()` variant.
 * **`BackingStoreT` Trait:** Defines the low-level storage operations (delete, persist, register, etc.). You typically implement this or use a provided one (like `FBStore`). This handles *where* and *how* raw data blobs (identified by `Uuid`) are physically stored.
 * **`Strategy<T>` Trait:** Extends `BackingStoreT`. Defines *how* your specific data type `T` is serialized (`store`) and deserialized (`load`).
 * **`BackingStore<B>` Struct:** A wrapper around a `BackingStoreT` implementation that manages concurrency, background tasks (using Tokio), and tracking of persistent paths. `FBPool` uses this internally.
@@ -25,7 +24,7 @@ This crate provides `FBPool` and `FBArc` (File-Backed Arc) to manage data (`T`) 
 
 * **`bincodec`**: Provides `fbstore::BinCodec`, an implementation of `fbstore::Codec<T>` using `bincode` for serialization (requires `T: Serialize + DeserializeOwned`).
 * **`prostcodec`**: Provides `fbstore::ProstCodec`, an implementation of `fbstore::Codec<T>` using `prost` for serialization (requires `T: prost::Message + Default`).
-* **`dupe`**: Implements `dupe::Dupe` for `FBArc`.
+* **`dupe`**: Implements `dupe::Dupe` for `Fb`.
 
 ## Basic Usage
 
@@ -170,8 +169,8 @@ async fn main() -> anyhow::Result<()> {
 * Methods often come in pairs:
     * `some_operation_async()` / `spawn_some_operation()`: Return a `Future` or `JoinHandle`, suitable for async contexts.
     * `blocking_some_operation()`: Perform the operation blockingly. Must not be called from an async context unless using `spawn_blocking` or `block_in_place`.
-* `FBArc::load()`: Special case. If data isn't in memory, it uses `tokio::task::block_in_place` to call the blocking load logic. **Warning:** This will panic if called within a `tokio::runtime::Runtime` created using `Runtime::new_current_thread`. Use `load_async` in async code.
-* The library aims to be thread-safe and select/cancel-safe; concurrent access via different `FBArc` handles (even for the same data) or pool operations from multiple threads should be handled correctly via internal synchronization.
+* `Fb::load()`: Special case. If data isn't in memory, it uses `tokio::task::block_in_place` to call the blocking load logic. **Warning:** This will panic if called within a `tokio::runtime::Runtime` created using `Runtime::new_current_thread`. Use `load_async` in async code.
+* The library aims to be thread-safe and select/cancel-safe; concurrent access via different `Fb` handle references (even for the same data) or pool operations from multiple threads should be handled correctly via internal synchronization.
 
 ## Running Examples
 
