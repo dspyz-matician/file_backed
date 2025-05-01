@@ -7,7 +7,7 @@ This crate provides `FBPool` and `Fb` (File-Backed item) to manage data (`T`) th
 
 1.  **In-Memory Cache:** An LRU cache (`FBPool`) keeps frequently/recently used items readily available in memory.
 2.  **Backing Store:** When items are evicted from the cache, or when explicitly requested, they are serialized and written to a temporary location in a backing store (like disk).
-3.  **Lazy Loading:** When an item not in the cache is accessed via its `Fb` handle (`.load()`, `.load_async()`, etc.), it's automatically read back from the backing store.
+3.  **Lazy Loading:** When an item not in the cache is accessed via its `Fb` handle (`.load()`, `.blocking_load()`, etc.), it's automatically read back from the backing store.
 4.  **Automatic Cleanup:** When an `Fb` for an item is dropped, its corresponding data in the *temporary* backing store is automatically deleted via a background task.
 5.  **Persistence:** Items can be explicitly "persisted" (e.g., hard-linked) to a separate, permanent location and later "registered" back into a pool, allowing data to survive application restarts.
 
@@ -167,9 +167,9 @@ async fn main() -> anyhow::Result<()> {
 
 * The `BackingStore` uses a Tokio runtime (`tokio::runtime::Handle`) provided during initialization to manage background tasks (like deletions, cache write-backs) and async operations.
 * Methods often come in pairs:
-    * `some_operation_async()` / `spawn_some_operation()`: Return a `Future` or `JoinHandle`, suitable for async contexts.
+    * `some_operation()` / `spawn_some_operation()`: Return a `Future` or `JoinHandle`, suitable for async contexts.
     * `blocking_some_operation()`: Perform the operation blockingly. Must not be called from an async context unless using `spawn_blocking` or `block_in_place`.
-* `Fb::load()`: Special case. If data isn't in memory, it uses `tokio::task::block_in_place` to call the blocking load logic. **Warning:** This will panic if called within a `tokio::runtime::Runtime` created using `Runtime::new_current_thread`. Use `load_async` in async code.
+* `Fb::load_in_place()`: Special case. If data isn't in memory, it uses `tokio::task::block_in_place` to call the blocking load logic. **Warning:** This will panic if called within a `tokio::runtime::Runtime` created using `Runtime::new_current_thread`. Use `load` in async code.
 * The library aims to be thread-safe and select/cancel-safe; concurrent access via different `Fb` handle references (even for the same data) or pool operations from multiple threads should be handled correctly via internal synchronization.
 
 ## Running Examples
