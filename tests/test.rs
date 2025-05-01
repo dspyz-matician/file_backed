@@ -182,7 +182,6 @@ impl BackingStoreT for TestStore {
 // Implement the Strategy trait for our TestStore and TestData
 impl Strategy<TestData> for TestStore {
     fn store(&self, key: Uuid, data: &TestData) {
-        self.call_counts.store.fetch_add(1, Ordering::SeqCst);
         println!("TestStore: Storing key {} data {:?} - STARTING", key, data);
 
         if !self.store_sleep_duration.is_zero() {
@@ -191,6 +190,8 @@ impl Strategy<TestData> for TestStore {
         }
 
         self.temp_data.insert(key, data.clone());
+        self.call_counts.store.fetch_add(1, Ordering::SeqCst);
+
         println!("TestStore: Storing key {} data {:?} - COMPLETED", key, data);
     }
 
@@ -2502,4 +2503,63 @@ async fn test_sync_try_load_mut_fails_while_store_is_running_for_eviction() {
         setup.calls.delete.load(Ordering::SeqCst) >= 1,
         "Delete for A should have occurred"
     );
+}
+
+#[tokio::test]
+async fn test_item_dropped_during_eviction_write_triggers_delete() {
+    let sleep_duration = Duration::from_millis(100); // Use a slightly longer sleep
+    println!(
+        "NOTE: This test uses mock TestStore::store with sleep: {:?}",
+        sleep_duration
+    );
+    // --- USE SETUP WITH SLEEP ---
+    let setup = setup_with_store_sleep(1, sleep_duration); // Cache size 1, 100ms sleep
+    // ----------------------------
+    let data_a = TestData {
+        id: 980,
+        content: "Drop During Store A".to_string(),
+    };
+    let data_b = TestData {
+        id: 981,
+        content: "Drop During Store B".to_string(),
+    };
+
+    // Insert A - cached and unique
+    let item_a = setup.pool.insert(data_a.clone());
+    let key_a = item_a.key();
+
+    // Insert B - should trigger eviction process for A, which calls store(A).
+    // The store(A) call will sleep for 100ms.
+    let _item_b = setup.pool.insert(data_b.clone());
+
+    // Give the background store task a moment to start sleeping.
+    tokio::time::sleep(Duration::from_millis(20)).await; // Less than sleep_duration
+
+    // Check that store hasn't finished yet and delete hasn't started
+    assert_eq!(setup.calls.store.load(Ordering::SeqCst), 0); // Store is likely still sleeping
+    assert_eq!(setup.calls.delete.load(Ordering::SeqCst), 0);
+
+    // --- Action: Drop the last (only) reference to A while store(A) is running ---
+    drop(item_a);
+
+    // --- Action: Wait for all background tasks to complete ---
+    // This will wait for store(A) to finish its sleep and complete the write.
+    // Then, because item_a was dropped, it should *immediately* trigger delete(A).
+    // wait_for_store should cover both.
+    wait_for_store(&setup.backing_store).await;
+
+    // --- Verification ---
+    // store: 1 (The write operation for A finished)
+    // delete: 1 (The delete operation for A was triggered right after store completed)
+    assert_eq!(setup.calls.store.load(Ordering::SeqCst), 1);
+    assert_eq!(setup.calls.delete.load(Ordering::SeqCst), 1);
+
+    // Verify the item is actually gone from the mock temp store
+    assert!(
+        !setup.store_impl.get_temp_keys().contains(&key_a),
+        "Item A should have been deleted from temp store immediately after being stored"
+    );
+
+    // _item_b drops implicitly, potentially triggering store/delete for B depending on cache state
+    // Just ensure the counts for A are correct.
 }
