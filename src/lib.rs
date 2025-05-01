@@ -52,8 +52,7 @@ struct FbInner<T, B: BackingStoreT> {
 impl<T, B: BackingStoreT> Drop for FbInner<T, B> {
     fn drop(&mut self) {
         let mut write_guard = self.pool.entries.write();
-        let limited = write_guard.remove(self.index).unwrap();
-        assert!(!limited.has_full());
+        write_guard.remove(self.index).unwrap();
     }
 }
 
@@ -80,7 +79,7 @@ impl<T, B: BackingStoreT> Drop for FbInner<T, B> {
 ///
 /// This approach aims to provide LRU-like behavior while optimizing for workloads
 /// where a subset of items is accessed very frequently.
-/// 
+///
 /// Internally, we store each item in an `Option<T>`. When an item is evicted from cache,
 /// we will replace `Some(val)` with None. Note that the size of `None::<T>`` on the
 /// stack is the exact same as that of Some(val). What this means is that if T's resources

@@ -37,10 +37,6 @@ struct EntryMetadata {
 }
 
 impl<T, B: BackingStoreT> LimitedEntry<T, B> {
-    pub(super) fn has_full(&self) -> bool {
-        self.backing.strong_count() > 0
-    }
-
     /// Returns None if there are currently open handles or the full entry no longer exists
     pub(super) fn try_dump_to_disk(&self, store: &Arc<BackingStore<B>>) -> Option<JoinHandle<()>>
     where
