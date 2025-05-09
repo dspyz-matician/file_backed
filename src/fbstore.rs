@@ -61,6 +61,9 @@ impl<T: serde::Serialize + serde::de::DeserializeOwned> Codec<T> for BinCodec {
 ///
 /// Requires the `prostcodec` feature flag.
 /// The type `T` must implement `prost::Message` and `Default`.
+///
+/// This codec uses `memmap2` for memory-mapped file reads, which can violate
+/// Rust's safety guarantees if the file is modified by another process while being accessed.
 #[cfg(feature = "prostcodec")]
 pub struct ProstCodec;
 
@@ -77,11 +80,9 @@ impl<T: Default + prost::Message> Codec<T> for ProstCodec {
 
     /// Reads all bytes from `file` and decodes them into a prost `Message` `T`.
     fn decode(&self, file: &mut File) -> anyhow::Result<T> {
-        use std::io::Read;
-
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
-        Ok(T::decode(&*bytes)?)
+        let mmap = unsafe { memmap2::Mmap::map(&*file) }?;
+        mmap.advise(memmap2::Advice::Sequential)?;
+        Ok(T::decode(&mut mmap.as_ref())?)
     }
 }
 
