@@ -255,7 +255,10 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
         store: &Arc<BackingStore<B>>,
         path: &TrackedPath<B::PersistPath>,
     ) {
-        blocking_persist(&self.backing, store, &self.meta, path);
+        let guard = self.backing.blocking_read();
+        let token = Arc::clone(guard.blocking_store(store, *self.meta.key.try_read().unwrap()));
+        drop(guard);
+        store.persist(&token, path);
     }
 }
 
@@ -275,16 +278,4 @@ impl<T, B: Strategy<T>> Backing<T, B> {
             store.store(key, data)
         })
     }
-}
-
-fn blocking_persist<T, B: Strategy<T>>(
-    backing: &Arc<tokio::sync::RwLock<Backing<T, B>>>,
-    store: &Arc<BackingStore<B>>,
-    meta: &EntryMetadata,
-    path: &TrackedPath<<B as BackingStoreT>::PersistPath>,
-) {
-    let guard = backing.blocking_read();
-    let token = Arc::clone(guard.blocking_store(store, *meta.key.try_read().unwrap()));
-    drop(guard);
-    store.persist(&token, path);
 }
