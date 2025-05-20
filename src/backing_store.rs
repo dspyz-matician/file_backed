@@ -156,9 +156,17 @@ impl<B: BackingStoreT> BackingStore<B> {
     /// Creates a new `BackingStore` manager.
     ///
     /// # Arguments
-    /// * `backing` - The low-level `BackingStoreT` implementation.
+    /// * `backing` - The low-level [BackingStoreT] implementation.
     /// * `runtime` - A handle to a Tokio runtime used for spawning background tasks
     ///   and managing async operations.
+    ///
+    /// If all available blocking threads on this runtime are simultaneously attempting a 
+    /// [blocking_load][bl], there can potentially be a deadlock. Either don't directly call
+    /// spawn_blocking on this runtime or at least don't saturate the blocking thread pool.
+    /// Alternatively don't use this runtime to call the `blocking_*` functions within file-backed,
+    /// or else use a separate tokio runtime.
+    /// 
+    /// [bl]: crate::Fb::blocking_load
     pub fn new(backing: B, runtime: tokio::runtime::Handle) -> Self {
         Self {
             backing,
@@ -170,8 +178,9 @@ impl<B: BackingStoreT> BackingStore<B> {
 
     /// Asynchronously begins tracking the given persistence `path`.
     ///
-    /// It retrieves all keys currently persisted at the path using `BackingStoreT::all_persisted_keys`
-    /// and returns a `JoinHandle` resolving to a `TrackedPath` containing the path and keys.
+    /// It retrieves all keys currently persisted at the path using the iterator returned from
+    /// [BackingStoreT::sanitize_path] and returns a `JoinHandle` resolving to a [TrackedPath]
+    /// containing the path and keys.
     pub fn track_path(
         self: &Arc<Self>,
         path: B::PersistPath,
