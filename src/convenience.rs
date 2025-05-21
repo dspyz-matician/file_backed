@@ -67,6 +67,9 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> Fb<T, B> {
 /// * `arcs`: An iterator providing the `Arc<Fb>` handles to persist.
 /// * `tracked`: The target persistent path information.
 /// * `max_simultaneous_tasks`: Controls the parallelism of the persist operations.
+/// * `runtime`: A tokio runtime handle on which to spawn the persist/delete tasks.
+///   If this is the same as the one used to create the `BackingStore`, `max_simultaneous_tasks`
+///   must be _less than_ the maximum number of blocking tasks to avoid potential deadlocks.
 /// * `change_key`: A closure executed *after* all persists succeed but *before* cleanup.
 ///   It should perform the atomic update of the external state.
 ///
@@ -77,6 +80,7 @@ pub fn blocking_save<T: Send + Sync + 'static, B: Strategy<T>, R, E>(
     arcs: impl IntoIterator<Item = Arc<Fb<T, B>>>,
     tracked: &Arc<TrackedPath<B::PersistPath>>,
     max_simultaneous_tasks: usize,
+    runtime: &tokio::runtime::Handle,
     change_key: impl FnOnce() -> Result<R, E>,
 ) -> Result<R, E> {
     blocking_save_with(
@@ -89,6 +93,7 @@ pub fn blocking_save<T: Send + Sync + 'static, B: Strategy<T>, R, E>(
         },
         tracked,
         max_simultaneous_tasks,
+        runtime,
         change_key,
     )
 }
@@ -124,6 +129,7 @@ pub fn blocking_save_with<B: BackingStoreT, R, E>(
     persist_arcs: impl FnOnce(&mut Persister<B>) -> Result<(), E>,
     tracked: &Arc<TrackedPath<B::PersistPath>>,
     max_simultaneous_tasks: usize,
+    runtime: &tokio::runtime::Handle,
     change_key: impl FnOnce() -> Result<R, E>,
 ) -> Result<R, E> {
     assert!(max_simultaneous_tasks > 0);
@@ -134,10 +140,10 @@ pub fn blocking_save_with<B: BackingStoreT, R, E>(
         join_set: JoinSet::new(),
         new_keys_set: HashSet::new(),
         max_simultaneous_tasks,
+        runtime: runtime.clone(),
     };
     persist_arcs(&mut persister)?;
     let new_keys_set = persister.new_keys_set;
-    let runtime = store.runtime_handle();
     runtime.block_on(async move {
         let _: Vec<()> = persister.join_set.join_all().await;
         store.sync(tracked).await.unwrap();
@@ -181,6 +187,7 @@ pub struct Persister<B: BackingStoreT> {
     join_set: JoinSet<()>,
     new_keys_set: HashSet<Uuid>,
     max_simultaneous_tasks: usize,
+    runtime: tokio::runtime::Handle,
 }
 
 impl<B: BackingStoreT> Persister<B> {
@@ -189,10 +196,9 @@ impl<B: BackingStoreT> Persister<B> {
     where
         B: Strategy<T>,
     {
-        let runtime_handle = self.backing_store.runtime_handle();
         assert!(self.join_set.len() <= self.max_simultaneous_tasks);
         if self.join_set.len() == self.max_simultaneous_tasks {
-            runtime_handle
+            self.runtime
                 .block_on(self.join_set.join_next())
                 .unwrap()
                 .unwrap();
@@ -201,7 +207,7 @@ impl<B: BackingStoreT> Persister<B> {
         self.new_keys_set.insert(arc.key());
         let arc = Arc::clone(arc);
         let task_tracker = self.backing_store.task_tracker().clone();
-        let runtime_clone = runtime_handle.clone();
+        let runtime_clone = self.runtime.clone();
         self.join_set.spawn_on(
             async move {
                 task_tracker
@@ -209,7 +215,7 @@ impl<B: BackingStoreT> Persister<B> {
                     .await
                     .unwrap()
             },
-            runtime_handle,
+            &self.runtime,
         );
     }
 }

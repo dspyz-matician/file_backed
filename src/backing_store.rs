@@ -210,7 +210,7 @@ impl<B: BackingStoreT> BackingStore<B> {
     }
 
     /// Returns a reference to the Tokio runtime handle used by this store.
-    pub fn runtime_handle(&self) -> &tokio::runtime::Handle {
+    pub(crate) fn runtime_handle(&self) -> &tokio::runtime::Handle {
         &self.runtime
     }
 
