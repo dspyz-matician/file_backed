@@ -8,30 +8,6 @@ use crate::backing_store::{BackingStore, BackingStoreT, Strategy, TrackedPath};
 use crate::{Fb, WriteGuard};
 
 impl<T: Send + Sync + 'static, B: Strategy<T>> Fb<T, B> {
-    /// Asynchronously ensures unique access to the data, returning a `WriteGuard`.
-    ///
-    /// If this `Arc` is not the unique reference (`full_count() > 1`), the underlying
-    /// data `T` is cloned (requiring `T: Clone`). The `Arc` is then updated to point
-    /// to this new, unique clone before returning the `WriteGuard`.
-    /// Similar to `Arc::make_mut`.
-    ///
-    /// If the operation is aborted (e.g., future dropped), this `Arc` might or might
-    /// not have been replaced with one wrapping the clone.
-    pub async fn make_mut(self: &mut Arc<Self>) -> WriteGuard<T, B>
-    where
-        T: Clone,
-    {
-        let arc = match get_mut_drop_weak(self) {
-            Ok(output) => return output.load_mut().await,
-            Err(arc) => arc,
-        };
-        let read_guard = arc.load().await;
-        let new_arc = Arc::new(arc.pool().insert(read_guard.clone()));
-        drop(read_guard);
-        *arc = new_arc;
-        Arc::get_mut(arc).unwrap().load_mut().await
-    }
-
     /// Blocking version of `make_mut`. Waits for the operation (including potential cloning)
     /// to complete. Requires `T: Clone`.
     /// Must not be called from an async context that isn't allowed to block.

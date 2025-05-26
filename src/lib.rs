@@ -5,8 +5,7 @@ use std::{
 
 use consume_on_drop::{Consume, ConsumeOnDrop};
 use cutoff_list::CutoffList;
-use parking_lot::RwLock;
-use tokio::sync::{RwLockMappedWriteGuard, RwLockReadGuard};
+use parking_lot::{MappedRwLockReadGuard, MappedRwLockWriteGuard, RwLock};
 
 use uuid::Uuid;
 
@@ -138,33 +137,6 @@ impl<T, B: BackingStoreT> FBPool<T, B> {
         }
     }
 
-    /// Asynchronously registers an existing item from a persistent path into the pool.
-    ///
-    /// Creates an `Fb` handle for an item identified by `key` located at the
-    /// tracked persistent `path`. This typically involves calling `BackingStoreT::register`
-    /// (e.g., hard-linking the file into the managed temporary area).
-    ///
-    /// The item data is *not* loaded into memory by this call.
-    /// Returns `None` if the registration fails (e.g., the underlying store fails to find the key).
-    pub async fn register(
-        self: &Arc<Self>,
-        path: &Arc<TrackedPath<B::PersistPath>>,
-        key: Uuid,
-    ) -> Option<Fb<T, B>>
-    where
-        T: Send + Sync + 'static,
-    {
-        let entry = FullEntry::register(key, &self.store, path).await?;
-        let index = self.entries.write().insert_last(entry.limited());
-        Some(Fb {
-            entry,
-            inner: FbInner {
-                index,
-                pool: Arc::clone(self),
-            },
-        })
-    }
-
     /// Blocking version of `register`. Waits for the registration to complete.
     /// Must not be called from an async context that isn't allowed to block.
     pub fn blocking_register(
@@ -203,26 +175,6 @@ impl<T, B: BackingStoreT> Fb<T, B> {
 }
 
 impl<T: Send + Sync + 'static, B: Strategy<T>> Fb<T, B> {
-    /// Asynchronously loads the data and returns a read guard.
-    ///
-    /// Returns a `Future` that resolves to a `ReadGuard` once the data is available
-    /// in memory (either immediately or after loading from the backing store).
-    /// Suitable for use within `async` functions and tasks.
-    pub async fn load(&self) -> ReadGuard<T, B> {
-        // We do this _before_ loading the backing value so that if the caller
-        // cancels the operation, we don't waste the work done to load it by
-        // immediately dumping it back to disk.
-        shift_forward(&self.inner.pool, self.inner.index);
-        // Construct before loading so that if cancelled, the object will be dumped
-        // if necessary (possible if a lot of things are loaded simultaneously).
-        let on_drop = GuardDropper::new(&self.inner.pool, self.inner.index);
-        let data_guard = self.entry.load(&self.inner.pool.store).await;
-        ReadGuard {
-            data_guard,
-            _on_drop: on_drop,
-        }
-    }
-
     /// Attempts to load the data and return a read guard, returning None if the data is not
     /// already in memory or is currently being evicted.
     /// The entry will only be potentially shifted in the LRU cache on success.
@@ -249,54 +201,6 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> Fb<T, B> {
         let on_drop = GuardDropper::new(&self.inner.pool, self.inner.index);
         let data_guard = self.entry.blocking_load(&self.inner.pool.store);
         ReadGuard {
-            data_guard,
-            _on_drop: on_drop,
-        }
-    }
-
-    /// Loads the data and returns a read guard for immutable access.
-    ///
-    /// - If the data is already in the memory cache, returns immediately.
-    /// - If the data is not in memory, it uses `tokio::task::block_in_place` to
-    ///   call `blocking_load` to load it from the backing store.
-    ///
-    /// This is for the somewhat niche situation where you need to load an FBArc in a
-    /// blocking function nested many blocking calls deep within an async task running
-    /// on a tokio multithreaded runtime. Ideally you would propagate async down and use
-    /// `load` instead.
-    ///
-    /// # Panics
-    /// This method will panic if called from within a `tokio::runtime::Runtime`
-    /// created using `Runtime::new_current_thread`, as `block_in_place` is not
-    /// supported there. Use `load` instead in async contexts and
-    /// `blocking_load` in known blocking contexts.
-    pub fn load_in_place(&self) -> ReadGuard<T, B> {
-        shift_forward(&self.inner.pool, self.inner.index);
-        let on_drop = GuardDropper::new(&self.inner.pool, self.inner.index);
-        let data_guard = self.entry.load_in_place(&self.inner.pool.store);
-        ReadGuard {
-            data_guard,
-            _on_drop: on_drop,
-        }
-    }
-
-    /// Asynchronously acquires mutable access to the data.
-    ///
-    /// On return:
-    /// 1. The data is ensured to be in memory.
-    /// 2. The corresponding file in the backing store's temporary location (if any) is deleted.
-    /// 3. The internal `Uuid` key for this data is changed.
-    /// 4. A `WriteGuard` providing mutable access is returned.
-    pub async fn load_mut(&mut self) -> WriteGuard<T, B> {
-        // We do this _before_ loading the backing value so that if the caller
-        // cancels the operation, we don't waste the work done to load it by
-        // immediately dumping it back to disk.
-        shift_forward(&self.inner.pool, self.inner.index);
-        // Construct before loading so that if cancelled, the object will be dumped
-        // if necessary (possible if a lot of things are loaded simultaneously).
-        let on_drop = GuardDropper::new(&self.inner.pool, self.inner.index);
-        let data_guard = self.entry.load_mut(&self.inner.pool.store).await;
-        WriteGuard {
             data_guard,
             _on_drop: on_drop,
         }
@@ -373,7 +277,7 @@ fn shift_forward<T: Send + Sync + 'static, B: Strategy<T>>(
 /// and will not be immediately evicted if it leaves the LRU cache.
 // Field ordering is important for try_dump_to_disk to succeed on drop
 pub struct ReadGuard<'a, T: Send + Sync + 'static, B: Strategy<T>> {
-    data_guard: RwLockReadGuard<'a, T>,
+    data_guard: MappedRwLockReadGuard<'a, T>,
     _on_drop: ConsumeOnDrop<GuardDropper<'a, T, B>>,
 }
 
@@ -391,7 +295,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> Deref for ReadGuard<'_, T, B> {
 /// While this guard is alive, the data is guaranteed to remain loaded in memory.
 // Field ordering is important for try_dump_to_disk to succeed on drop
 pub struct WriteGuard<'a, T: Send + Sync + 'static, B: Strategy<T>> {
-    data_guard: RwLockMappedWriteGuard<'a, T>,
+    data_guard: MappedRwLockWriteGuard<'a, T>,
     _on_drop: ConsumeOnDrop<GuardDropper<'a, T, B>>,
 }
 
