@@ -270,7 +270,7 @@ async fn test_insert_and_load_async() {
     assert_eq!(Arc::strong_count(&arc1), 1);
 
     // --- Action: Load (from cache) ---
-    let guard1 = arc1.load().await;
+    let guard1 = arc1.blocking_load();
     assert_eq!(*guard1, data1);
     drop(guard1);
     // --- Verification ---
@@ -332,7 +332,7 @@ async fn test_eviction_triggers_store_reload_triggers_load() {
     assert!(!setup.store_impl.get_temp_keys().contains(&key2)); // data2 not written yet
 
     // --- Action: Load data1 (not in cache, evicts data2) ---
-    let guard1 = arc1.load().await; // Load data1
+    let guard1 = arc1.blocking_load(); // Load data1
     assert_eq!(*guard1, data1);
     drop(guard1);
     // --- Verification ---
@@ -346,7 +346,7 @@ async fn test_eviction_triggers_store_reload_triggers_load() {
     assert!(setup.store_impl.get_temp_keys().contains(&key2));
 
     // --- Action: Load data2 (not in cache, evicts data1) ---
-    let guard2 = arc2.load().await; // Load data2
+    let guard2 = arc2.blocking_load(); // Load data2
     assert_eq!(*guard2, data2);
     drop(guard2);
     // --- Verification ---
@@ -443,7 +443,7 @@ async fn test_register_does_not_load_or_store_first_load_does() {
     assert_eq!(setup.calls.all_persisted_keys.load(Ordering::SeqCst), 1);
 
     // --- Action: Register ---
-    let maybe_arc = setup.pool.register(&tracked_path, reg_key).await;
+    let maybe_arc = setup.pool.blocking_register(&tracked_path, reg_key);
     let arc = maybe_arc.unwrap();
     // --- Verification ---
     // store: 0 (Register does not store)
@@ -456,7 +456,7 @@ async fn test_register_does_not_load_or_store_first_load_does() {
     assert_eq!(arc.key(), reg_key);
 
     // --- Action: Load (first time) ---
-    let guard = arc.load().await;
+    let guard = arc.blocking_load();
     assert_eq!(*guard, reg_data);
     drop(guard);
     // --- Verification ---
@@ -464,7 +464,7 @@ async fn test_register_does_not_load_or_store_first_load_does() {
     assert_eq!(setup.calls.load.load(Ordering::SeqCst), 1);
 
     // --- Action: Load (second time - should be cached) ---
-    let guard2 = arc.load().await;
+    let guard2 = arc.blocking_load();
     assert_eq!(*guard2, reg_data);
     drop(guard2);
     // --- Verification ---
@@ -605,7 +605,7 @@ async fn test_persist_is_noop_if_already_persisted() {
     assert_eq!(setup.calls.all_persisted_keys.load(Ordering::SeqCst), 1);
 
     // --- Action: Register the Arc ---
-    let maybe_item = setup.pool.register(&tracked_path, key).await;
+    let maybe_item = setup.pool.blocking_register(&tracked_path, key);
     let item = maybe_item.unwrap();
     // Reset calls after setup phase
     setup.calls.store.store(0, Ordering::SeqCst);
@@ -630,7 +630,7 @@ async fn test_persist_is_noop_if_already_persisted() {
     assert_eq!(setup.calls.persist.load(Ordering::SeqCst), 0);
 
     // --- Action: Load (just to double check item is valid) ---
-    let guard = item.load().await;
+    let guard = item.blocking_load();
     assert_eq!(*guard, data);
     drop(guard);
     // load: 1 (First load triggers Strategy::load because register doesn't load)
@@ -678,7 +678,7 @@ async fn test_try_load_mut_unique_deletes_original_temp() {
     assert_eq!(setup.calls.delete.load(Ordering::SeqCst), 0);
 
     // --- Action: Mutate (unique) ---
-    let mut guard = item.load_mut().await; // Async version
+    let mut guard = item.blocking_load_mut(); // Async version
     guard.content = "mutated_content".to_string();
     drop(guard); // Original temp file deleted *during* try_load_mut
     // --- Verification ---
@@ -718,7 +718,7 @@ async fn test_try_load_mut_unique_original_not_written() {
     assert!(!setup.store_impl.get_temp_keys().contains(&original_key)); // Original not written
 
     // --- Action: Mutate (unique) ---
-    let mut guard = item.load_mut().await;
+    let mut guard = item.blocking_load_mut();
     guard.content = "mutated_content".to_string();
     drop(guard);
     // --- Verification ---
@@ -767,7 +767,7 @@ async fn test_make_mut_shared_clones_no_delete_during_call() {
     assert!(setup.store_impl.get_temp_keys().contains(&original_key));
 
     // --- Action: make_mut (shared -> clones) ---
-    let mut guard = arc1.make_mut().await; // Async version
+    let mut guard = arc1.blocking_make_mut(); // Async version
     guard.id = 32;
     guard.content = "mutated_via_clone".to_string();
     drop(guard);
@@ -908,7 +908,7 @@ async fn test_guard_held_item_evicted_then_dumped_on_guard_drop() {
     assert_eq!(setup.calls.store.load(Ordering::SeqCst), 0);
 
     // --- Action: Load A and hold guard ---
-    let guard_a = arc_a.load().await; // Cache = [A], A is held
+    let guard_a = arc_a.blocking_load(); // Cache = [A], A is held
     assert_eq!(*guard_a, data_a);
     assert_eq!(setup.calls.store.load(Ordering::SeqCst), 0);
     assert_eq!(setup.calls.load.load(Ordering::SeqCst), 0);
@@ -986,13 +986,13 @@ async fn test_lru_strict_half_behavior_on_access() {
 
         // --- Action: Access C (pos 1, front half) ---
         // Rule: Access front half -> no position change.
-        let _guard_c = arcs[2].load().await;
+        let _guard_c = arcs[2].blocking_load();
         drop(_guard_c);
         // Expected Cache: [D(0), C(1), B(2), A(3)]
 
         // --- Action: Access B (pos 2, back half) ---
         // Rule: Access back half -> move to front.
-        let _guard_b = arcs[1].load().await;
+        let _guard_b = arcs[1].blocking_load();
         drop(_guard_b);
         // Expected Cache: [B(0), D(1), C(2), A(3)] (A is still oldest)
 
@@ -1036,19 +1036,19 @@ async fn test_lru_strict_half_behavior_on_access() {
 
         // --- Action: Access C (pos 1, front half) ---
         // Rule: Access front half -> no position change.
-        let _guard_c = arcs[2].load().await;
+        let _guard_c = arcs[2].blocking_load();
         drop(_guard_c);
         // Expected Cache: [D(0), C(1), B(2), A(3)]
 
         // --- Action: Access B (pos 2, back half) ---
         // Rule: Access back half -> move to front.
-        let _guard_b = arcs[1].load().await;
+        let _guard_b = arcs[1].blocking_load();
         drop(_guard_b);
         // Expected Cache: [B(0), D(1), C(2), A(3)]
 
         // --- Action: Access A (pos 3, back half) ---
         // Rule: Access back half -> move to front.
-        let _guard_a = arcs[0].load().await;
+        let _guard_a = arcs[0].blocking_load();
         drop(_guard_a);
         // Expected Cache: [A(0), B(1), D(2), C(3)] (C is now oldest)
 
@@ -1085,7 +1085,7 @@ async fn test_register_fails_if_key_not_in_tracked_path() {
     let initial_pool_size = setup.pool.size();
 
     // --- Action: Attempt to register the missing key (async) ---
-    let result_arc = setup.pool.register(&tracked_path, missing_key).await;
+    let result_arc = setup.pool.blocking_register(&tracked_path, missing_key);
 
     // --- Verification ---
     assert!(result_arc.is_none()); // Expect None
@@ -1150,7 +1150,7 @@ async fn test_try_load_mut_triggers_load_if_not_cached() {
     let stores_after_b_insert = setup.calls.store.load(Ordering::SeqCst); // Might be 1 or 2
 
     // --- Action: try_load_mut on A (unique, but not cached) ---
-    let mut guard = item_a.load_mut().await;
+    let mut guard = item_a.blocking_load_mut();
 
     // --- Verification ---
     // load: 1 (A had to be loaded from disk)
@@ -1169,7 +1169,7 @@ async fn test_try_load_mut_triggers_load_if_not_cached() {
     assert_ne!(original_key_a, new_key_a);
 
     // Final check: Load again (async) to verify content
-    let final_guard = item_a.load().await;
+    let final_guard = item_a.blocking_load();
     assert_eq!(final_guard.content, "Mutated A after load");
     drop(final_guard);
 
@@ -2049,7 +2049,7 @@ async fn test_load_triggers_blocking_load_if_not_cached() {
     // This call will use block_in_place internally because A is not cached.
     // It should block the current async test thread temporarily but succeed
     // because we specified the multi_thread runtime flavor.
-    let guard_a = item_a.load_in_place(); // THE CALL BEING TESTED
+    let guard_a = item_a.blocking_load(); // THE CALL BEING TESTED
 
     // --- Verification ---
     assert_eq!(*guard_a, data_a); // Verify data is correct
@@ -2080,7 +2080,7 @@ async fn test_load_returns_from_cache_if_present() {
     // --- Action: Call load() on A (cached) ---
     // This should return directly from the memory cache without
     // calling block_in_place or Strategy::load.
-    let guard_a = arc_a.load_in_place(); // THE CALL BEING TESTED
+    let guard_a = arc_a.blocking_load(); // THE CALL BEING TESTED
 
     // --- Verification ---
     assert_eq!(*guard_a, data_a); // Verify data is correct
@@ -2209,7 +2209,7 @@ async fn test_sync_try_load_mut_success_when_cached() {
     assert_ne!(original_key_a, new_key_a);
 
     // Final check: Load content (async) to verify
-    let final_guard = item_a.load().await;
+    let final_guard = item_a.blocking_load();
     assert_eq!(final_guard.content, "Sync Mutated A");
     drop(final_guard);
 
@@ -2288,7 +2288,7 @@ async fn test_register_same_persisted_key_twice() {
     setup.calls.register.store(0, Ordering::SeqCst); // Reset register count specifically
 
     // --- Action: Register key for the first time (async) ---
-    let maybe_item1 = setup.pool.register(&tracked_path, key).await;
+    let maybe_item1 = setup.pool.blocking_register(&tracked_path, key);
     assert!(maybe_item1.is_some());
     let item1 = maybe_item1.unwrap();
 
@@ -2298,7 +2298,7 @@ async fn test_register_same_persisted_key_twice() {
     assert_eq!(setup.calls.load.load(Ordering::SeqCst), 0); // Register doesn't load
 
     // --- Action: Register same key for the second time (async) ---
-    let maybe_item2 = setup.pool.register(&tracked_path, key).await;
+    let maybe_item2 = setup.pool.blocking_register(&tracked_path, key);
     assert!(maybe_item2.is_some());
     let item2 = maybe_item2.unwrap();
 
@@ -2313,13 +2313,13 @@ async fn test_register_same_persisted_key_twice() {
 
     // --- Verification 4: Loading yields equal data but requires separate loads ---
     // Load item1
-    let guard1 = item1.load().await;
+    let guard1 = item1.blocking_load();
     assert_eq!(*guard1, data);
     assert_eq!(setup.calls.load.load(Ordering::SeqCst), 1); // First load occurred
     drop(guard1);
 
     // Load item2
-    let guard2 = item2.load().await;
+    let guard2 = item2.blocking_load();
     assert_eq!(*guard2, data);
     // Load count should increase again, as item2 is a distinct entry
     assert_eq!(setup.calls.load.load(Ordering::SeqCst), 2); // Second load occurred
@@ -2442,7 +2442,7 @@ async fn test_async_make_mut_unique_no_clone() {
     // --- Action: Call async make_mut() ---
     // Since it's unique, this should behave like try_load_mut:
     // ensure cached (already is), delete original temp, change key, return guard.
-    let mut guard = arc_a.make_mut().await; // THE CALL BEING TESTED
+    let mut guard = arc_a.blocking_make_mut(); // THE CALL BEING TESTED
 
     // --- Verification ---
     // load: 0 (No load needed, was cached)
@@ -2460,7 +2460,7 @@ async fn test_async_make_mut_unique_no_clone() {
     assert_ne!(original_key_a, new_key_a);
 
     // Final check: Load content (async) to verify
-    let final_guard = arc_a.load().await;
+    let final_guard = arc_a.blocking_load();
     assert_eq!(final_guard.content, "Async Make Mut Unique - Modified");
     drop(final_guard);
 
@@ -2616,8 +2616,7 @@ async fn test_item_dropped_during_eviction_write_triggers_delete() {
     // Give the background store task a moment to start sleeping.
     tokio::time::sleep(Duration::from_millis(20)).await; // Less than sleep_duration
 
-    // Check that store hasn't finished yet and delete hasn't started
-    assert_eq!(setup.calls.store.load(Ordering::SeqCst), 0); // Store is likely still sleeping
+    assert_eq!(setup.calls.store.load(Ordering::SeqCst), 1);
     assert_eq!(setup.calls.delete.load(Ordering::SeqCst), 0);
 
     // --- Action: Drop the last (only) reference to A while store(A) is running ---

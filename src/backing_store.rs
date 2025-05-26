@@ -209,11 +209,6 @@ impl<B: BackingStoreT> BackingStore<B> {
         self.task_tracker.spawn_blocking_on(f, &self.runtime)
     }
 
-    /// Returns a reference to the Tokio runtime handle used by this store.
-    pub(crate) fn runtime_handle(&self) -> &tokio::runtime::Handle {
-        &self.runtime
-    }
-
     /// Returns a reference to the underlying `TaskTracker` used for detecting
     /// when all background tasks have completed.
     pub fn task_tracker(&self) -> &TaskTracker {
