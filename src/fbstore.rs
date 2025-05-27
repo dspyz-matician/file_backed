@@ -304,19 +304,21 @@ impl<C: Send + Sync + 'static> BackingStoreT for FBStore<C> {
     /// On other platforms, this will be a no-op.
     ///
     /// # Panics
-    /// Panics if the directory `path` cannot be opened.
-    /// On Linux, panics if `syncfs` fails.
+    /// Panics if the directory `path` cannot be opened or if `syncfs` fails.
+    #[allow(unused_variables)]
     fn sync_persisted(&self, path: &Self::PersistPath) {
-        let file = File::open(&**path)
-            .unwrap_or_else(|err| panic!("Failed to open dir {}: {:?}", path.display(), err));
         #[cfg(target_os = "linux")]
-        nix::unistd::syncfs(std::os::fd::AsRawFd::as_raw_fd(&file)).unwrap_or_else(|err| {
-            panic!(
-                "Failed to sync file system of dir {}: {:?}",
-                path.display(),
-                err
-            )
-        });
+        {
+            let file = File::open(&**path)
+                .unwrap_or_else(|err| panic!("Failed to open dir {}: {:?}", path.display(), err));
+            nix::unistd::syncfs(std::os::fd::AsRawFd::as_raw_fd(&file)).unwrap_or_else(|err| {
+                panic!(
+                    "Failed to sync file system of dir {}: {:?}",
+                    path.display(),
+                    err
+                )
+            });
+        }
     }
 }
 
