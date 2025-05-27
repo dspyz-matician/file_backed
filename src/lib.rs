@@ -82,7 +82,7 @@ impl<T, B: BackingStoreT> Drop for FbInner<T, B> {
 /// stack is the exact same as that of Some(val). What this means is that if T's resources
 /// are primarily represented by its space on the stack (e.g. when `T` is `[f32; 4096]`),
 /// there will be zero savings when it's removed from cache. In these cases, you should
-/// use Box<T> instead.
+/// use `Box<T>` instead.
 pub struct FBPool<T, B: BackingStoreT> {
     entries: RwLock<CutoffList<LimitedEntry<T, B>>>,
     store: Arc<BackingStore<B>>,
