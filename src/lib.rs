@@ -128,31 +128,15 @@ impl<T, B: BackingStoreT> FBPool<T, B> {
             entry.try_dump_to_disk(&self.store);
         }
         drop(guard);
-        Fb {
-            entry,
-            inner: FbInner {
-                index,
-                pool: Arc::clone(self),
-            },
-        }
+        Fb { entry, inner: FbInner { index, pool: Arc::clone(self) } }
     }
 
     /// Blocking version of `register`. Waits for the registration to complete.
     /// Must not be called from an async context that isn't allowed to block.
-    pub fn blocking_register(
-        self: &Arc<Self>,
-        path: &TrackedPath<B::PersistPath>,
-        key: Uuid,
-    ) -> Option<Fb<T, B>> {
+    pub fn blocking_register(self: &Arc<Self>, path: &TrackedPath<B::PersistPath>, key: Uuid) -> Option<Fb<T, B>> {
         let entry = FullEntry::blocking_register(key, &self.store, path)?;
         let index = self.entries.write().insert_last(entry.limited());
-        Some(Fb {
-            entry,
-            inner: FbInner {
-                index,
-                pool: Arc::clone(self),
-            },
-        })
+        Some(Fb { entry, inner: FbInner { index, pool: Arc::clone(self) } })
     }
 
     /// Returns the current number of items managed by the pool (both in memory and on disk).
@@ -182,10 +166,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> Fb<T, B> {
         let guard = self.entry.try_load()?;
         shift_forward(&self.inner.pool, self.inner.index);
         let on_drop = GuardDropper::new(&self.inner.pool, self.inner.index);
-        Some(ReadGuard {
-            data_guard: guard,
-            _on_drop: on_drop,
-        })
+        Some(ReadGuard { data_guard: guard, _on_drop: on_drop })
     }
 
     /// Loads the data and returns a read guard, performing blocking I/O if necessary.
@@ -200,10 +181,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> Fb<T, B> {
         shift_forward(&self.inner.pool, self.inner.index);
         let on_drop = GuardDropper::new(&self.inner.pool, self.inner.index);
         let data_guard = self.entry.blocking_load(&self.inner.pool.store);
-        ReadGuard {
-            data_guard,
-            _on_drop: on_drop,
-        }
+        ReadGuard { data_guard, _on_drop: on_drop }
     }
 
     /// Attempts to load the data and return a write guard, returning None if the data is not
@@ -213,10 +191,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> Fb<T, B> {
         let guard = self.entry.try_load_mut()?;
         shift_forward(&self.inner.pool, self.inner.index);
         let on_drop = GuardDropper::new(&self.inner.pool, self.inner.index);
-        Some(WriteGuard {
-            data_guard: guard,
-            _on_drop: on_drop,
-        })
+        Some(WriteGuard { data_guard: guard, _on_drop: on_drop })
     }
 
     /// Blocking version of `load_mut`. Waits for the operation to complete.
@@ -225,10 +200,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> Fb<T, B> {
         shift_forward(&self.inner.pool, self.inner.index);
         let on_drop = GuardDropper::new(&self.inner.pool, self.inner.index);
         let data_guard = self.entry.blocking_load_mut(&self.inner.pool.store);
-        WriteGuard {
-            data_guard,
-            _on_drop: on_drop,
-        }
+        WriteGuard { data_guard, _on_drop: on_drop }
     }
 
     /// Performs a blocking write of the data to the backing store's temporary location
@@ -246,10 +218,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> Fb<T, B> {
     }
 }
 
-fn shift_forward<T: Send + Sync + 'static, B: Strategy<T>>(
-    pool: &FBPool<T, B>,
-    index: cutoff_list::Index,
-) {
+fn shift_forward<T: Send + Sync + 'static, B: Strategy<T>>(pool: &FBPool<T, B>, index: cutoff_list::Index) {
     let read_guard = pool.entries.read();
     let preceding_cutoffs = read_guard.preceding_cutoffs(index).unwrap();
     if preceding_cutoffs == 0 {
@@ -324,10 +293,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> Consume for GuardDropper<'_, T, B
         let preceding_cutoffs = entry_guard.preceding_cutoffs(self.index).unwrap();
         assert!(preceding_cutoffs <= 2);
         if preceding_cutoffs == 2 {
-            entry_guard
-                .get(self.index)
-                .unwrap()
-                .try_dump_to_disk(&self.pool.store);
+            entry_guard.get(self.index).unwrap().try_dump_to_disk(&self.pool.store);
         }
     }
 }

@@ -141,10 +141,7 @@ pub fn blocking_save_with<B: BackingStoreT, R, E>(
         join_set.spawn_on(
             async move {
                 task_tracker
-                    .spawn_blocking_on(
-                        move || store.blocking_delete_persisted(&tracked, key),
-                        &runtime_clone,
-                    )
+                    .spawn_blocking_on(move || store.blocking_delete_persisted(&tracked, key), &runtime_clone)
                     .await
                     .unwrap()
             },
@@ -174,10 +171,7 @@ impl<B: BackingStoreT> Persister<B> {
     {
         assert!(self.join_set.len() <= self.max_simultaneous_tasks);
         if self.join_set.len() == self.max_simultaneous_tasks {
-            self.runtime
-                .block_on(self.join_set.join_next())
-                .unwrap()
-                .unwrap();
+            self.runtime.block_on(self.join_set.join_next()).unwrap().unwrap();
         }
         let tracked = Arc::clone(&self.tracked);
         self.new_keys_set.insert(arc.key());

@@ -181,20 +181,14 @@ impl<B: BackingStoreT> BackingStore<B> {
     /// It retrieves all keys currently persisted at the path using the iterator returned from
     /// [BackingStoreT::sanitize_path] and returns a `JoinHandle` resolving to a [TrackedPath]
     /// containing the path and keys.
-    pub fn track_path(
-        self: &Arc<Self>,
-        path: B::PersistPath,
-    ) -> JoinHandle<TrackedPath<B::PersistPath>> {
+    pub fn track_path(self: &Arc<Self>, path: B::PersistPath) -> JoinHandle<TrackedPath<B::PersistPath>> {
         let this = Arc::clone(self);
         self.spawn_blocking(move || this.blocking_track_path(path))
     }
 
     /// Blocking version of `track_path`. Waits for the path tracking to complete.
     /// Must not be called from an async context that isn't allowed to block.
-    pub fn blocking_track_path(
-        self: &Arc<Self>,
-        path: B::PersistPath,
-    ) -> TrackedPath<B::PersistPath> {
+    pub fn blocking_track_path(self: &Arc<Self>, path: B::PersistPath) -> TrackedPath<B::PersistPath> {
         let all_keys = self.backing.sanitize_path(&path);
         let present = key_map(all_keys);
         TrackedPath { path, present }
@@ -294,11 +288,7 @@ impl<B: BackingStoreT> BackingStore<B> {
     /// Asynchronously triggers the underlying `BackingStoreT::delete_persisted`
     /// operation for the given `key` at the `tracked` path.
     /// Returns a `JoinHandle` that completes when the deletion is done.
-    pub fn delete_persisted(
-        self: &Arc<Self>,
-        tracked: &Arc<TrackedPath<B::PersistPath>>,
-        key: Uuid,
-    ) -> JoinHandle<()> {
+    pub fn delete_persisted(self: &Arc<Self>, tracked: &Arc<TrackedPath<B::PersistPath>>, key: Uuid) -> JoinHandle<()> {
         let this = Arc::clone(self);
         let tracked = Arc::clone(tracked);
         self.spawn_blocking(move || this.blocking_delete_persisted(&tracked, key))
