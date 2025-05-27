@@ -128,7 +128,7 @@ impl BackingStoreT for TestStore {
         assert!(
             self.persisted_data
                 .get(src_path)
-                .map_or(false, |s| s.contains(&key)),
+                .is_some_and(|s| s.contains(&key)),
             "Attempted to register key {} which is not persisted at {:?}",
             key,
             src_path
@@ -1700,7 +1700,6 @@ async fn test_try_load_mut_fails_if_not_unique() {
 
     // --- Verification (async) ---
     assert!(result_async.is_none()); // Should fail
-    drop(result_async);
     assert_eq!(arc1.key(), original_key); // Key should not change
     assert_eq!(
         setup.calls.delete.load(Ordering::SeqCst),
@@ -2263,7 +2262,7 @@ async fn test_sync_try_load_mut_fails_when_not_cached() {
     // Cleanup
     drop(item_a); // A was stored, delete should happen
     wait_for_store(&setup.backing_store).await;
-    assert!(setup.calls.delete.load(Ordering::SeqCst) >= initial_delete_count + 1);
+    assert!(setup.calls.delete.load(Ordering::SeqCst) > initial_delete_count);
 }
 
 #[tokio::test]

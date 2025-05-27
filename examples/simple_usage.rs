@@ -20,9 +20,12 @@ fn main() -> anyhow::Result<()> {
 
     // 2. Insert items
     let mut items = Vec::new();
-    items.push(pool.insert("Hello".to_string()));
-    items.push(pool.insert("World".to_string()));
-    items.push(pool.insert("!".to_string())); // "Hello" starts being evicted now
+    #[allow(clippy::vec_init_then_push)]
+    {
+        items.push(pool.insert("Hello".to_string()));
+        items.push(pool.insert("World".to_string()));
+        items.push(pool.insert("!".to_string())); // "Hello" starts being evicted now
+    }
 
     // 3. Load an item (might load from disk if evicted)
     let guard = items[0].blocking_load(); // Load "Hello". Now "World" will be evicted.
