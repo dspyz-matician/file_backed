@@ -50,10 +50,7 @@ impl<T: serde::Serialize + serde::de::DeserializeOwned> Codec<T> for BinCodec {
 
     /// Decodes data from `file` into `T` using `bincode` (legacy config).
     fn decode(&self, file: &mut File) -> anyhow::Result<T> {
-        Ok(bincode::serde::decode_from_std_read(
-            file,
-            bincode::config::legacy(),
-        )?)
+        Ok(bincode::serde::decode_from_std_read(file, bincode::config::legacy())?)
     }
 }
 
@@ -121,9 +118,9 @@ impl PreparedPath {
     pub async fn new(path: PathBuf, ignored: Vec<&'static str>) -> Self {
         for b in 0..=0xff {
             let dir = path.join(format!("{:02x}", b));
-            tokio::fs::create_dir_all(&dir).await.unwrap_or_else(|err| {
-                panic!("Failed to create directory {}: {:?}", dir.display(), err)
-            });
+            tokio::fs::create_dir_all(&dir)
+                .await
+                .unwrap_or_else(|err| panic!("Failed to create directory {}: {:?}", dir.display(), err));
         }
         Self { path, ignored }
     }
@@ -143,9 +140,8 @@ impl PreparedPath {
     pub fn blocking_new(path: PathBuf, ignored: Vec<&'static str>) -> Self {
         for b in 0..=0xff {
             let dir = path.join(format!("{:02x}", b));
-            std::fs::create_dir_all(&dir).unwrap_or_else(|err| {
-                panic!("Failed to create directory {}: {:?}", dir.display(), err)
-            });
+            std::fs::create_dir_all(&dir)
+                .unwrap_or_else(|err| panic!("Failed to create directory {}: {:?}", dir.display(), err));
         }
         Self { path, ignored }
     }
@@ -191,9 +187,8 @@ impl<C: Send + Sync + 'static> BackingStoreT for FBStore<C> {
     /// Panics if the file cannot be removed (e.g., permissions, not found).
     fn delete(&self, key: Uuid) {
         let file_path = key_path(&self.path, key);
-        fs::remove_file(&file_path).unwrap_or_else(|err| {
-            panic!("Failed to remove file {}: {:?}", file_path.display(), err)
-        });
+        fs::remove_file(&file_path)
+            .unwrap_or_else(|err| panic!("Failed to remove file {}: {:?}", file_path.display(), err));
     }
 
     /// Deletes the file associated with `key` from the specified persistent `path`.
@@ -202,9 +197,8 @@ impl<C: Send + Sync + 'static> BackingStoreT for FBStore<C> {
     /// Panics if the file cannot be removed from the *target* path.
     fn delete_persisted(&self, path: &Self::PersistPath, key: Uuid) {
         let file_path = key_path(path, key);
-        fs::remove_file(&file_path).unwrap_or_else(|err| {
-            panic!("Failed to remove file {}: {:?}", file_path.display(), err)
-        });
+        fs::remove_file(&file_path)
+            .unwrap_or_else(|err| panic!("Failed to remove file {}: {:?}", file_path.display(), err));
     }
 
     /// Registers an item by hard-linking its file from `src_path` into this store's directory.
@@ -257,9 +251,7 @@ impl<C: Send + Sync + 'static> BackingStoreT for FBStore<C> {
     /// will be logged as warnings and **deleted** from the filesystem during the scan.
     fn sanitize_path(&self, path: &Self::PersistPath) -> impl IntoIterator<Item = Uuid> {
         WalkDir::new(&**path).into_iter().filter_map(|entry| {
-            let entry = entry.unwrap_or_else(|err| {
-                panic!("Failed to read directory {}: {:?}", path.display(), err)
-            });
+            let entry = entry.unwrap_or_else(|err| panic!("Failed to read directory {}: {:?}", path.display(), err));
             if entry.file_type().is_dir() {
                 return None;
             }
@@ -309,22 +301,16 @@ impl<C: Send + Sync + 'static> BackingStoreT for FBStore<C> {
     fn sync_persisted(&self, path: &Self::PersistPath) {
         #[cfg(target_os = "linux")]
         {
-            let file = File::open(&**path)
-                .unwrap_or_else(|err| panic!("Failed to open dir {}: {:?}", path.display(), err));
-            nix::unistd::syncfs(std::os::fd::AsRawFd::as_raw_fd(&file)).unwrap_or_else(|err| {
-                panic!(
-                    "Failed to sync file system of dir {}: {:?}",
-                    path.display(),
-                    err
-                )
-            });
+            let file =
+                File::open(&**path).unwrap_or_else(|err| panic!("Failed to open dir {}: {:?}", path.display(), err));
+            nix::unistd::syncfs(std::os::fd::AsRawFd::as_raw_fd(&file))
+                .unwrap_or_else(|err| panic!("Failed to sync file system of dir {}: {:?}", path.display(), err));
         }
     }
 }
 
 fn remove_file(path: &Path) {
-    std::fs::remove_file(path)
-        .unwrap_or_else(|err| panic!("Failed to remove file {}: {:?}", path.display(), err));
+    std::fs::remove_file(path).unwrap_or_else(|err| panic!("Failed to remove file {}: {:?}", path.display(), err));
 }
 
 impl<T, C: Codec<T>> Strategy<T> for FBStore<C> {
@@ -340,9 +326,9 @@ impl<T, C: Codec<T>> Strategy<T> for FBStore<C> {
         let file_path = key_path(&self.path, key);
         let mut create_options = fs::OpenOptions::new();
         create_options.create_new(true).write(true);
-        let mut file = create_options.open(&file_path).unwrap_or_else(|err| {
-            panic!("Failed to create file {}: {:?}", file_path.display(), err)
-        });
+        let mut file = create_options
+            .open(&file_path)
+            .unwrap_or_else(|err| panic!("Failed to create file {}: {:?}", file_path.display(), err));
         self.codec
             .encode(data, &mut file)
             .with_context(|| format!("Failed to write data to {}", file_path.display(),))

@@ -5,8 +5,7 @@
 use std::sync::{Arc, OnceLock, Weak};
 
 use parking_lot::{
-    MappedRwLockReadGuard, MappedRwLockWriteGuard, RwLockReadGuard, RwLockUpgradableReadGuard,
-    RwLockWriteGuard,
+    MappedRwLockReadGuard, MappedRwLockWriteGuard, RwLockReadGuard, RwLockUpgradableReadGuard, RwLockWriteGuard,
 };
 use uuid::Uuid;
 
@@ -66,9 +65,7 @@ impl<T, B: BackingStoreT> FullEntry<T, B> {
                 memory: Some(data),
                 stored: OnceLock::new(),
             })),
-            meta: Arc::new(EntryMetadata {
-                key: parking_lot::RwLock::new(Uuid::new_v4()),
-            }),
+            meta: Arc::new(EntryMetadata { key: parking_lot::RwLock::new(Uuid::new_v4()) }),
         }
     }
 
@@ -93,9 +90,7 @@ impl<T, B: BackingStoreT> FullEntry<T, B> {
                 memory: None,
                 stored: OnceLock::from(store.register(key, path)?),
             })),
-            meta: Arc::new(EntryMetadata {
-                key: parking_lot::RwLock::new(key),
-            }),
+            meta: Arc::new(EntryMetadata { key: parking_lot::RwLock::new(key) }),
         })
     }
 }
@@ -157,11 +152,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
         read_guard.blocking_store(store, self.key());
     }
 
-    pub(super) fn blocking_persist(
-        &self,
-        store: &Arc<BackingStore<B>>,
-        path: &TrackedPath<B::PersistPath>,
-    ) {
+    pub(super) fn blocking_persist(&self, store: &Arc<BackingStore<B>>, path: &TrackedPath<B::PersistPath>) {
         let guard = self.backing.read();
         let token = Arc::clone(guard.blocking_store(store, *self.meta.key.try_read().unwrap()));
         drop(guard);
@@ -175,11 +166,7 @@ struct Backing<T, B: BackingStoreT> {
 }
 
 impl<T, B: Strategy<T>> Backing<T, B> {
-    fn blocking_store(
-        &self,
-        store: &Arc<BackingStore<B>>,
-        key: Uuid,
-    ) -> &Arc<backing_store::Token<B>> {
+    fn blocking_store(&self, store: &Arc<BackingStore<B>>, key: Uuid) -> &Arc<backing_store::Token<B>> {
         self.stored.get_or_init(|| {
             let data = self.memory.as_ref().unwrap();
             store.store(key, data)

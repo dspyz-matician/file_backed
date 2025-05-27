@@ -109,13 +109,7 @@ pub fn blocking_save_with<B: BackingStoreT, R, E>(
     change_key: impl FnOnce() -> Result<R, E>,
 ) -> Result<R, E> {
     let mut old_keys = tracked.all_keys();
-    let new_keys_set = prepare_save(
-        store,
-        persist_arcs,
-        tracked,
-        max_simultaneous_tasks,
-        runtime,
-    )?;
+    let new_keys_set = prepare_save(store, persist_arcs, tracked, max_simultaneous_tasks, runtime)?;
     store.blocking_sync(tracked.path());
     let output = change_key()?;
     old_keys.retain(|key| !new_keys_set.contains(key));
@@ -167,10 +161,7 @@ pub fn post_save_cleanup<B: BackingStoreT>(
         join_set.spawn_on(
             async move {
                 task_tracker
-                    .spawn_blocking_on(
-                        move || store.blocking_delete_persisted(&tracked, key),
-                        &runtime_clone,
-                    )
+                    .spawn_blocking_on(move || store.blocking_delete_persisted(&tracked, key), &runtime_clone)
                     .await
                     .unwrap()
             },
@@ -199,10 +190,7 @@ impl<B: BackingStoreT> Persister<B> {
     {
         assert!(self.join_set.len() <= self.max_simultaneous_tasks);
         if self.join_set.len() == self.max_simultaneous_tasks {
-            self.runtime
-                .block_on(self.join_set.join_next())
-                .unwrap()
-                .unwrap();
+            self.runtime.block_on(self.join_set.join_next()).unwrap().unwrap();
         }
         let tracked = Arc::clone(&self.tracked);
         self.new_keys_set.insert(arc.key());

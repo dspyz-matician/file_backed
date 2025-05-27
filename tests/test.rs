@@ -2,8 +2,8 @@ use std::{
     collections::HashSet,
     path::{Path, PathBuf},
     sync::{
-        Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
     },
     time::Duration,
 };
@@ -12,7 +12,7 @@ use dashmap::{DashMap, DashSet};
 use uuid::Uuid;
 
 use file_backed::backing_store::{BackingStore, BackingStoreT, Strategy};
-use file_backed::{FBPool, Fb, convenience::blocking_save};
+use file_backed::{convenience::blocking_save, FBPool, Fb};
 
 // Simple clonable data structure for testing
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,10 +66,7 @@ impl TestStore {
     // Helper for tests to pre-populate persisted state
     pub fn _add_persisted(&self, path: &Path, key: Uuid, data: TestData) {
         self.temp_data.insert(key, data); // Make it loadable for register test
-        self.persisted_data
-            .entry(path.to_path_buf())
-            .or_default()
-            .insert(key);
+        self.persisted_data.entry(path.to_path_buf()).or_default().insert(key);
         println!("TestStore: Pre-added persisted key {} at {:?}", key, path);
     }
 
@@ -100,9 +97,7 @@ impl BackingStoreT for TestStore {
     }
 
     fn delete_persisted(&self, path: &Self::PersistPath, key: Uuid) {
-        self.call_counts
-            .delete_persisted
-            .fetch_add(1, Ordering::SeqCst);
+        self.call_counts.delete_persisted.fetch_add(1, Ordering::SeqCst);
         println!("TestStore: Deleting persisted key {} from {:?}", key, path);
         let path_entry = self.persisted_data.get_mut(path).unwrap_or_else(|| {
             panic!(
@@ -126,9 +121,7 @@ impl BackingStoreT for TestStore {
         // Simulate hard link: ensure it's in persisted and make it available in temp
         // Fail Fast: Assert the key is actually persisted at src_path
         assert!(
-            self.persisted_data
-                .get(src_path)
-                .is_some_and(|s| s.contains(&key)),
+            self.persisted_data.get(src_path).is_some_and(|s| s.contains(&key)),
             "Attempted to register key {} which is not persisted at {:?}",
             key,
             src_path
@@ -160,9 +153,7 @@ impl BackingStoreT for TestStore {
     }
 
     fn sanitize_path(&self, path: &Self::PersistPath) -> impl IntoIterator<Item = Uuid> {
-        self.call_counts
-            .all_persisted_keys
-            .fetch_add(1, Ordering::SeqCst);
+        self.call_counts.all_persisted_keys.fetch_add(1, Ordering::SeqCst);
         println!("TestStore: Getting all persisted keys for {:?}", path);
         match self.persisted_data.get(path) {
             Some(keys) => keys.iter().map(|k| *k).collect::<Vec<_>>(),
@@ -171,9 +162,7 @@ impl BackingStoreT for TestStore {
     }
 
     fn sync_persisted(&self, path: &Self::PersistPath) {
-        self.call_counts
-            .sync_persisted
-            .fetch_add(1, Ordering::SeqCst);
+        self.call_counts.sync_persisted.fetch_add(1, Ordering::SeqCst);
         println!("TestStore: Syncing persisted path {:?}", path);
         // No-op for mock, just count
     }
@@ -228,13 +217,7 @@ pub fn setup_with_store_sleep(mem_size: usize, store_sleep: Duration) -> TestSet
     let pool = Arc::new(FBPool::new(backing_store.clone(), mem_size));
     let calls = store_impl.call_counts.clone();
 
-    TestSetup {
-        runtime,
-        store_impl,
-        backing_store,
-        pool,
-        calls,
-    }
+    TestSetup { runtime, store_impl, backing_store, pool, calls }
 }
 
 // Helper to wait for background tasks
@@ -252,10 +235,7 @@ fn test_path_b() -> PathBuf {
 #[tokio::test]
 async fn test_insert_and_load_async() {
     let setup = setup(10);
-    let data1 = TestData {
-        id: 1,
-        content: "hello".to_string(),
-    };
+    let data1 = TestData { id: 1, content: "hello".to_string() };
 
     // --- Action: Insert ---
     let arc1 = Arc::new(setup.pool.insert(data1.clone()));
@@ -301,14 +281,8 @@ async fn test_insert_and_load_async() {
 #[tokio::test]
 async fn test_eviction_triggers_store_reload_triggers_load() {
     let setup = setup(1); // Cache size 1
-    let data1 = TestData {
-        id: 1,
-        content: "data1".to_string(),
-    };
-    let data2 = TestData {
-        id: 2,
-        content: "data2".to_string(),
-    };
+    let data1 = TestData { id: 1, content: "data1".to_string() };
+    let data2 = TestData { id: 2, content: "data2".to_string() };
 
     // --- Action: Insert data1 ---
     let arc1 = setup.pool.insert(data1.clone());
@@ -371,10 +345,7 @@ async fn test_eviction_triggers_store_reload_triggers_load() {
 #[tokio::test]
 async fn test_write_now_triggers_store_drop_triggers_delete() {
     let setup = setup(10);
-    let data1 = TestData {
-        id: 10,
-        content: "write_now_delete".to_string(),
-    };
+    let data1 = TestData { id: 10, content: "write_now_delete".to_string() };
 
     let item1 = setup.pool.insert(data1.clone());
     let key1 = item1.key();
@@ -419,25 +390,16 @@ async fn test_register_does_not_load_or_store_first_load_does() {
     let setup = setup(10);
     let reg_key = Uuid::new_v4();
     let reg_path = test_path_a();
-    let reg_data = TestData {
-        id: 99,
-        content: "registered".to_string(),
-    };
+    let reg_data = TestData { id: 99, content: "registered".to_string() };
 
     // Prepare mock state: item exists persisted, AND loadable via temp store
     // because `register` implementation needs load to work later.
-    setup
-        .store_impl
-        ._add_persisted(&reg_path, reg_key, reg_data.clone());
+    setup.store_impl._add_persisted(&reg_path, reg_key, reg_data.clone());
     assert!(setup.store_impl.get_temp_keys().contains(&reg_key)); // Mock setup check
     setup.calls.store.store(0, Ordering::SeqCst); // Reset calls from mock setup
 
     // --- Action: Track Path ---
-    let tracked_path = setup
-        .backing_store
-        .track_path(reg_path.clone())
-        .await
-        .unwrap();
+    let tracked_path = setup.backing_store.track_path(reg_path.clone()).await.unwrap();
     let tracked_path = Arc::new(tracked_path);
     assert!(tracked_path.all_keys().contains(&reg_key));
     assert_eq!(setup.calls.all_persisted_keys.load(Ordering::SeqCst), 1);
@@ -485,10 +447,7 @@ async fn test_register_does_not_load_or_store_first_load_does() {
 async fn test_persist_triggers_store_if_not_written_noop_if_done() {
     // Renamed slightly
     let setup = setup(10);
-    let data = TestData {
-        id: 5,
-        content: "persist_store".to_string(),
-    };
+    let data = TestData { id: 5, content: "persist_store".to_string() };
     let persist_path = test_path_b();
 
     // --- Action: Insert ---
@@ -500,11 +459,7 @@ async fn test_persist_triggers_store_if_not_written_noop_if_done() {
 
     // --- Action: Track Path ---
     // We need to track *before* persisting so the TrackedPath knows the initial state.
-    let tracked_path = setup
-        .backing_store
-        .track_path(persist_path.clone())
-        .await
-        .unwrap();
+    let tracked_path = setup.backing_store.track_path(persist_path.clone()).await.unwrap();
     let tracked_path = Arc::new(tracked_path);
     // Assume initially empty for this test path
     assert!(!tracked_path.all_keys().contains(&key));
@@ -524,12 +479,7 @@ async fn test_persist_triggers_store_if_not_written_noop_if_done() {
     assert_eq!(setup.calls.store.load(Ordering::SeqCst), 1);
     assert_eq!(setup.calls.persist.load(Ordering::SeqCst), 1);
     assert!(setup.store_impl.get_temp_keys().contains(&key));
-    assert!(
-        setup
-            .store_impl
-            .get_persisted_keys(&persist_path)
-            .contains(&key)
-    );
+    assert!(setup.store_impl.get_persisted_keys(&persist_path).contains(&key));
 
     // Update tracked path state conceptually (real impl might need re-tracking or updates)
     // For the test, we know the key *is* persisted now. The existing `tracked_path` Arc
@@ -559,12 +509,7 @@ async fn test_persist_triggers_store_if_not_written_noop_if_done() {
     // delete: 1 (Item was written to temp store)
     assert_eq!(setup.calls.delete.load(Ordering::SeqCst), 1);
     assert!(!setup.store_impl.get_temp_keys().contains(&key));
-    assert!(
-        setup
-            .store_impl
-            .get_persisted_keys(&persist_path)
-            .contains(&key)
-    );
+    assert!(setup.store_impl.get_persisted_keys(&persist_path).contains(&key));
 
     // Cleanup persisted
     let delete_persisted_handle = tokio::task::spawn_blocking({
@@ -573,12 +518,7 @@ async fn test_persist_triggers_store_if_not_written_noop_if_done() {
         move || store.blocking_delete_persisted(&tracked_clone, key)
     });
     delete_persisted_handle.await.unwrap();
-    assert!(
-        !setup
-            .store_impl
-            .get_persisted_keys(&persist_path)
-            .contains(&key)
-    );
+    assert!(!setup.store_impl.get_persisted_keys(&persist_path).contains(&key));
 }
 
 #[tokio::test]
@@ -586,10 +526,7 @@ async fn test_persist_is_noop_if_already_persisted() {
     let setup = setup(10);
     let key = Uuid::new_v4();
     let path = test_path_a();
-    let data = TestData {
-        id: 100,
-        content: "already_persisted".to_string(),
-    };
+    let data = TestData { id: 100, content: "already_persisted".to_string() };
 
     // --- Setup: Simulate item already persisted ---
     // Add to mock persisted *and* temp store (so register -> load works)
@@ -658,10 +595,7 @@ async fn test_persist_is_noop_if_already_persisted() {
 #[tokio::test]
 async fn test_try_load_mut_unique_deletes_original_temp() {
     let setup = setup(10);
-    let data = TestData {
-        id: 20,
-        content: "mutate_unique_del".to_string(),
-    };
+    let data = TestData { id: 20, content: "mutate_unique_del".to_string() };
 
     let item = setup.pool.insert(data.clone());
     let original_key = item.key();
@@ -681,9 +615,9 @@ async fn test_try_load_mut_unique_deletes_original_temp() {
     let mut guard = item.blocking_load_mut(); // Async version
     guard.content = "mutated_content".to_string();
     drop(guard); // Original temp file deleted *during* try_load_mut
-    // --- Verification ---
-    // store: 1 (No new store call)
-    // delete: 1 (Original key's temp file deleted)
+                 // --- Verification ---
+                 // store: 1 (No new store call)
+                 // delete: 1 (Original key's temp file deleted)
     let new_key = item.key();
     assert_ne!(original_key, new_key);
     wait_for_store(&setup.backing_store).await; // Allow delete task to run
@@ -705,10 +639,7 @@ async fn test_try_load_mut_unique_deletes_original_temp() {
 #[tokio::test]
 async fn test_try_load_mut_unique_original_not_written() {
     let setup = setup(10);
-    let data = TestData {
-        id: 23,
-        content: "mutate_unique_not_written".to_string(),
-    };
+    let data = TestData { id: 23, content: "mutate_unique_not_written".to_string() };
 
     let mut item = setup.pool.insert(data.clone());
     let original_key = item.key();
@@ -744,10 +675,7 @@ async fn test_try_load_mut_unique_original_not_written() {
 #[tokio::test]
 async fn test_make_mut_shared_clones_no_delete_during_call() {
     let setup = setup(10);
-    let data = TestData {
-        id: 31,
-        content: "make_mut_shared_clone".to_string(),
-    };
+    let data = TestData { id: 31, content: "make_mut_shared_clone".to_string() };
 
     let arc1 = Arc::new(setup.pool.insert(data.clone()));
     let arc2 = arc1.clone(); // Shared reference
@@ -809,19 +737,10 @@ async fn test_blocking_save_convenience() {
     // So we call it via spawn_blocking from the test.
     let setup = setup(10);
     let path = test_path_a();
-    let data1 = TestData {
-        id: 101,
-        content: "save1".to_string(),
-    };
-    let data2 = TestData {
-        id: 102,
-        content: "save2".to_string(),
-    };
+    let data1 = TestData { id: 101, content: "save1".to_string() };
+    let data2 = TestData { id: 102, content: "save2".to_string() };
     let existing_key = Uuid::new_v4();
-    let existing_data = TestData {
-        id: 100,
-        content: "existing".to_string(),
-    };
+    let existing_data = TestData { id: 100, content: "existing".to_string() };
 
     setup
         .store_impl
@@ -889,18 +808,9 @@ async fn test_blocking_save_convenience() {
 async fn test_guard_held_item_evicted_then_dumped_on_guard_drop() {
     // Renamed for clarity
     let setup = setup(2); // Cache size 2
-    let data_a = TestData {
-        id: 1,
-        content: "Item A".to_string(),
-    };
-    let data_b = TestData {
-        id: 2,
-        content: "Item B".to_string(),
-    };
-    let data_c = TestData {
-        id: 3,
-        content: "Item C".to_string(),
-    };
+    let data_a = TestData { id: 1, content: "Item A".to_string() };
+    let data_b = TestData { id: 2, content: "Item B".to_string() };
+    let data_c = TestData { id: 3, content: "Item C".to_string() };
 
     // --- Action: Insert A ---
     let arc_a = setup.pool.insert(data_a.clone()); // Cache = [A]
@@ -921,8 +831,8 @@ async fn test_guard_held_item_evicted_then_dumped_on_guard_drop() {
     // --- Action: Insert C (A is evicted, B remains) ---
     let arc_c = setup.pool.insert(data_c.clone()); // Cache = [C, B], A is evicted but held by guard
     let key_c = arc_c.key(); // To check later
-    // --- Verification ---
-    // store: 0 (A is evicted but held by guard, store deferred until guard drop)
+                             // --- Verification ---
+                             // store: 0 (A is evicted but held by guard, store deferred until guard drop)
     wait_for_store(&setup.backing_store).await; // Ensure no unexpected stores happened
     assert_eq!(setup.calls.store.load(Ordering::SeqCst), 0);
     assert!(!setup.store_impl.get_temp_keys().contains(&key_a)); // A not stored yet
@@ -931,20 +841,17 @@ async fn test_guard_held_item_evicted_then_dumped_on_guard_drop() {
     // A was evicted, now the guard is dropped. A should be stored now.
     drop(guard_a);
     wait_for_store(&setup.backing_store).await; // Wait for the deferred store task
-    // --- Verification ---
-    // store: 1 (A should be stored now)
+                                                // --- Verification ---
+                                                // store: 1 (A should be stored now)
     assert_eq!(setup.calls.store.load(Ordering::SeqCst), 1);
     assert!(setup.store_impl.get_temp_keys().contains(&key_a)); // A should now be in temp store
 
     // --- Action: Insert D (evicts B) ---
-    let data_d = TestData {
-        id: 4,
-        content: "Item D".to_string(),
-    };
+    let data_d = TestData { id: 4, content: "Item D".to_string() };
     let _arc_d = setup.pool.insert(data_d.clone()); // Cache = [D, C], B evicted.
     wait_for_store(&setup.backing_store).await; // Wait for B's eviction store
-    // --- Verification ---
-    // store: 2 (B stored on eviction - no guard was held for B)
+                                                // --- Verification ---
+                                                // store: 2 (B stored on eviction - no guard was held for B)
     assert_eq!(setup.calls.store.load(Ordering::SeqCst), 2);
     assert!(setup.store_impl.get_temp_keys().contains(&key_b)); // B stored
 
@@ -952,7 +859,7 @@ async fn test_guard_held_item_evicted_then_dumped_on_guard_drop() {
     drop(arc_a); // A was stored, last ref drop -> delete A scheduled
     drop(arc_b); // B was stored, last ref drop -> delete B scheduled
     drop(arc_c); // C not stored (still in cache), last ref drop -> no delete C scheduled
-    // arc_d also not stored
+                 // arc_d also not stored
     wait_for_store(&setup.backing_store).await;
     // delete: 2 (A and B deleted)
     assert_eq!(setup.calls.delete.load(Ordering::SeqCst), 2);
@@ -969,10 +876,7 @@ async fn test_lru_strict_half_behavior_on_access() {
         println!("--- LRU Strict Half Test: Scenario 1 (Oldest A Evicted) ---");
         let setup = setup(4); // Cache size 4 (Front={0,1}, Back={2,3})
         let items = (0..5)
-            .map(|i| TestData {
-                id: i,
-                content: format!("Item {}", i),
-            })
+            .map(|i| TestData { id: i, content: format!("Item {}", i) })
             .collect::<Vec<_>>();
 
         // --- Action: Fill cache A, B, C, D ---
@@ -1019,10 +923,7 @@ async fn test_lru_strict_half_behavior_on_access() {
         println!("--- LRU Strict Half Test: Scenario 2 (Oldest C Evicted) ---");
         let setup = setup(4); // New setup
         let items = (0..5)
-            .map(|i| TestData {
-                id: i,
-                content: format!("Item {}", i),
-            })
+            .map(|i| TestData { id: i, content: format!("Item {}", i) })
             .collect::<Vec<_>>();
 
         // --- Action: Fill cache A, B, C, D ---
@@ -1090,15 +991,12 @@ async fn test_register_fails_if_key_not_in_tracked_path() {
     // --- Verification ---
     assert!(result_arc.is_none()); // Expect None
     assert_eq!(setup.pool.size(), initial_pool_size); // Pool size shouldn't change
-    // Assuming register checks TrackedPath first or BackingStoreT::register indicates failure cleanly
-    // We expect the underlying BackingStoreT::register not to be called, or to fail without side effects.
-    // Strictest check is just on the Option result and pool size.
-    // Let's assume the FBPool::register implementation avoids calling BackingStoreT::register
-    // if the key isn't in the tracked path's known keys.
-    assert_eq!(
-        setup.calls.register.load(Ordering::SeqCst),
-        initial_register_calls
-    ); // No successful register call counted
+                                                      // Assuming register checks TrackedPath first or BackingStoreT::register indicates failure cleanly
+                                                      // We expect the underlying BackingStoreT::register not to be called, or to fail without side effects.
+                                                      // Strictest check is just on the Option result and pool size.
+                                                      // Let's assume the FBPool::register implementation avoids calling BackingStoreT::register
+                                                      // if the key isn't in the tracked path's known keys.
+    assert_eq!(setup.calls.register.load(Ordering::SeqCst), initial_register_calls); // No successful register call counted
 
     // --- Action: Attempt to register the missing key (blocking) ---
     let register_handle = tokio::task::spawn_blocking({
@@ -1111,23 +1009,14 @@ async fn test_register_fails_if_key_not_in_tracked_path() {
     // --- Verification ---
     assert!(result_blocking.is_none()); // Expect None
     assert_eq!(setup.pool.size(), initial_pool_size);
-    assert_eq!(
-        setup.calls.register.load(Ordering::SeqCst),
-        initial_register_calls
-    );
+    assert_eq!(setup.calls.register.load(Ordering::SeqCst), initial_register_calls);
 }
 
 #[tokio::test]
 async fn test_try_load_mut_triggers_load_if_not_cached() {
     let setup = setup(1); // Cache size 1
-    let data_a = TestData {
-        id: 50,
-        content: "Load For Mut A".to_string(),
-    };
-    let data_b = TestData {
-        id: 51,
-        content: "Load For Mut B".to_string(),
-    };
+    let data_a = TestData { id: 50, content: "Load For Mut A".to_string() };
+    let data_b = TestData { id: 51, content: "Load For Mut B".to_string() };
 
     // --- Action: Insert A, Write A ---
     let item_a = setup.pool.insert(data_a.clone());
@@ -1137,7 +1026,7 @@ async fn test_try_load_mut_triggers_load_if_not_cached() {
         item_a
     });
     let mut item_a = write_handle.await.unwrap(); // A is now in temp store
-    // store: 1, load: 0, delete: 0
+                                                  // store: 1, load: 0, delete: 0
     assert_eq!(setup.calls.store.load(Ordering::SeqCst), 1);
     assert_eq!(setup.calls.load.load(Ordering::SeqCst), 0);
     assert_eq!(setup.calls.delete.load(Ordering::SeqCst), 0);
@@ -1186,14 +1075,8 @@ async fn test_try_load_mut_triggers_load_if_not_cached() {
 async fn test_blocking_save_skips_already_persisted() {
     let setup = setup(10);
     let path = test_path_b(); // Use a distinct path
-    let data_a = TestData {
-        id: 70,
-        content: "Save A".to_string(),
-    };
-    let data_b = TestData {
-        id: 71,
-        content: "Save B".to_string(),
-    };
+    let data_a = TestData { id: 70, content: "Save A".to_string() };
+    let data_b = TestData { id: 71, content: "Save B".to_string() };
 
     // --- Setup: Insert A, B ---
     let arc_a = Arc::new(setup.pool.insert(data_a.clone()));
@@ -1307,15 +1190,10 @@ async fn test_blocking_save_more_items_than_max_simultaneous() {
 
     // --- Setup: Insert items ---
     let items: Vec<TestData> = (0..num_items)
-        .map(|i| TestData {
-            id: 100 + i,
-            content: format!("Item {}", i),
-        })
+        .map(|i| TestData { id: 100 + i, content: format!("Item {}", i) })
         .collect();
-    let arcs: Vec<Arc<Fb<TestData, Arc<TestStore>>>> = items
-        .iter()
-        .map(|d| Arc::new(setup.pool.insert(d.clone())))
-        .collect();
+    let arcs: Vec<Arc<Fb<TestData, Arc<TestStore>>>> =
+        items.iter().map(|d| Arc::new(setup.pool.insert(d.clone()))).collect();
     let keys: Vec<Uuid> = arcs.iter().map(|a| a.key()).collect();
 
     assert_eq!(setup.calls.persist.load(Ordering::SeqCst), 0);
@@ -1353,10 +1231,7 @@ async fn test_blocking_save_more_items_than_max_simultaneous() {
 
     // --- Verification ---
     // Ensure all items were processed despite parallelism limit
-    assert_eq!(
-        setup.calls.persist.load(Ordering::SeqCst),
-        num_items as usize
-    );
+    assert_eq!(setup.calls.persist.load(Ordering::SeqCst), num_items as usize);
     // Each item likely needed storing to temp first
     assert_eq!(setup.calls.store.load(Ordering::SeqCst), num_items as usize);
     assert_eq!(setup.calls.sync_persisted.load(Ordering::SeqCst), 1);
@@ -1372,10 +1247,7 @@ async fn test_blocking_save_more_items_than_max_simultaneous() {
     // Cleanup
     drop(arcs); // Drop all FBArcs
     wait_for_store(&setup.backing_store).await;
-    assert_eq!(
-        setup.calls.delete.load(Ordering::SeqCst),
-        num_items as usize
-    ); // All temp items deleted
+    assert_eq!(setup.calls.delete.load(Ordering::SeqCst), num_items as usize); // All temp items deleted
 
     // Cleanup persisted
     let cleanup_handle = tokio::task::spawn_blocking({
@@ -1398,15 +1270,10 @@ async fn test_blocking_register_success() {
     let setup = setup(10);
     let reg_key = Uuid::new_v4();
     let reg_path = test_path_a();
-    let reg_data = TestData {
-        id: 200,
-        content: "blocking_register_data".to_string(),
-    };
+    let reg_data = TestData { id: 200, content: "blocking_register_data".to_string() };
 
     // Setup mock state
-    setup
-        .store_impl
-        ._add_persisted(&reg_path, reg_key, reg_data.clone());
+    setup.store_impl._add_persisted(&reg_path, reg_key, reg_data.clone());
     setup.calls.store.store(0, Ordering::SeqCst); // Reset calls
 
     // Track path (using blocking version correctly)
@@ -1445,14 +1312,8 @@ async fn test_blocking_register_success() {
 #[tokio::test]
 async fn test_blocking_load_success() {
     let setup = setup(1); // Cache size 1
-    let data_a = TestData {
-        id: 210,
-        content: "blocking_load_A".to_string(),
-    };
-    let data_b = TestData {
-        id: 211,
-        content: "blocking_load_B".to_string(),
-    };
+    let data_a = TestData { id: 210, content: "blocking_load_A".to_string() };
+    let data_b = TestData { id: 211, content: "blocking_load_B".to_string() };
 
     // Insert A, write A to temp store
     let arc_a = Arc::new(setup.pool.insert(data_a.clone()));
@@ -1494,10 +1355,7 @@ async fn test_blocking_load_success() {
 #[tokio::test]
 async fn test_blocking_write_now_success() {
     let setup = setup(10);
-    let data = TestData {
-        id: 220,
-        content: "blocking_write_now".to_string(),
-    };
+    let data = TestData { id: 220, content: "blocking_write_now".to_string() };
 
     let arc = Arc::new(setup.pool.insert(data.clone()));
     let key = arc.key();
@@ -1532,10 +1390,7 @@ async fn test_blocking_write_now_success() {
 #[tokio::test]
 async fn test_blocking_persist_success() {
     let setup = setup(10);
-    let data = TestData {
-        id: 230,
-        content: "blocking_persist".to_string(),
-    };
+    let data = TestData { id: 230, content: "blocking_persist".to_string() };
     let path = test_path_a();
 
     let arc = Arc::new(setup.pool.insert(data.clone()));
@@ -1577,10 +1432,7 @@ async fn test_blocking_persist_success() {
 #[tokio::test]
 async fn test_blocking_try_load_mut_success() {
     let setup = setup(10);
-    let data = TestData {
-        id: 240,
-        content: "blocking_try_mut".to_string(),
-    };
+    let data = TestData { id: 240, content: "blocking_try_mut".to_string() };
 
     let mut arc = Arc::new(setup.pool.insert(data.clone()));
     let original_key = arc.key();
@@ -1632,10 +1484,7 @@ async fn test_blocking_try_load_mut_success() {
 #[tokio::test]
 async fn test_blocking_make_mut_success_unique() {
     let setup = setup(10);
-    let data = TestData {
-        id: 250,
-        content: "blocking_make_mut".to_string(),
-    };
+    let data = TestData { id: 250, content: "blocking_make_mut".to_string() };
 
     let mut arc = Arc::new(setup.pool.insert(data.clone()));
     let original_key = arc.key();
@@ -1682,10 +1531,7 @@ async fn test_blocking_make_mut_success_unique() {
 #[tokio::test]
 async fn test_try_load_mut_fails_if_not_unique() {
     let setup = setup(10);
-    let data = TestData {
-        id: 300,
-        content: "try_mut_fail".to_string(),
-    };
+    let data = TestData { id: 300, content: "try_mut_fail".to_string() };
 
     // --- Setup: Create shared Arc ---
     let mut arc1 = Arc::new(setup.pool.insert(data.clone()));
@@ -1701,10 +1547,7 @@ async fn test_try_load_mut_fails_if_not_unique() {
     // --- Verification (async) ---
     assert!(result_async.is_none()); // Should fail
     assert_eq!(arc1.key(), original_key); // Key should not change
-    assert_eq!(
-        setup.calls.delete.load(Ordering::SeqCst),
-        initial_delete_count
-    ); // No delete call
+    assert_eq!(setup.calls.delete.load(Ordering::SeqCst), initial_delete_count); // No delete call
 
     // --- Action: blocking_try_load_mut ---
     let handle_blocking = tokio::task::spawn_blocking({
@@ -1715,17 +1558,14 @@ async fn test_try_load_mut_fails_if_not_unique() {
         move || Arc::get_mut(&mut arc1_clone).is_some()
     });
     let succeeded = handle_blocking.await.unwrap(); // Unwrap JoinError
-    // Get arc1 back - its state shouldn't have changed
-    // let arc1 = handle_blocking.await.unwrap().1; // This doesn't work as maybe_guard doesn't hold arc
+                                                    // Get arc1 back - its state shouldn't have changed
+                                                    // let arc1 = handle_blocking.await.unwrap().1; // This doesn't work as maybe_guard doesn't hold arc
 
     // --- Verification (blocking) ---
     assert!(!succeeded); // Should fail
-    // We can't easily check arc1's key here without returning it,
-    // but we can check the delete count hasn't changed.
-    assert_eq!(
-        setup.calls.delete.load(Ordering::SeqCst),
-        initial_delete_count
-    ); // No delete call
+                         // We can't easily check arc1's key here without returning it,
+                         // but we can check the delete count hasn't changed.
+    assert_eq!(setup.calls.delete.load(Ordering::SeqCst), initial_delete_count); // No delete call
 
     // Keep arc2 alive until end of test
     drop(arc2);
@@ -1741,10 +1581,7 @@ async fn test_blocking_save_many_deletions_exceeding_limit() {
 
     // --- Setup: Insert and Save initial items ---
     let initial_items: Vec<TestData> = (0..num_initial)
-        .map(|i| TestData {
-            id: 400 + i,
-            content: format!("Initial {}", i),
-        })
+        .map(|i| TestData { id: 400 + i, content: format!("Initial {}", i) })
         .collect();
     let initial_arcs: Vec<_> = initial_items
         .iter()
@@ -1775,19 +1612,13 @@ async fn test_blocking_save_many_deletions_exceeding_limit() {
     setup.backing_store.finished().await; // Ensure all tasks are finished
 
     // Verification 1
-    assert_eq!(
-        setup.calls.persist.load(Ordering::SeqCst),
-        num_initial as usize
-    );
+    assert_eq!(setup.calls.persist.load(Ordering::SeqCst), num_initial as usize);
     assert_eq!(setup.calls.delete_persisted.load(Ordering::SeqCst), 0);
     assert_eq!(setup.store_impl.get_persisted_keys(&path), initial_keys);
 
     // --- Setup: Insert new items ---
     let new_items: Vec<TestData> = (0..num_new)
-        .map(|i| TestData {
-            id: 500 + i,
-            content: format!("New {}", i),
-        })
+        .map(|i| TestData { id: 500 + i, content: format!("New {}", i) })
         .collect();
     let new_arcs: Vec<_> = new_items
         .iter()
@@ -1857,10 +1688,7 @@ async fn test_blocking_save_many_deletions_exceeding_limit() {
 async fn test_blocking_make_mut_shared_clones() {
     let setup = setup(10);
     // Ensure the data type is Clone
-    let data = TestData {
-        id: 31,
-        content: "make_mut_shared_blocking".to_string(),
-    };
+    let data = TestData { id: 31, content: "make_mut_shared_blocking".to_string() };
 
     // --- Setup: Create shared Arc and write original data ---
     let mut arc1 = Arc::new(setup.pool.insert(data.clone()));
@@ -1943,14 +1771,8 @@ async fn test_blocking_make_mut_shared_clones() {
 #[tokio::test]
 async fn test_blocking_try_load_mut_triggers_load_if_not_cached() {
     let setup = setup(1); // Cache size 1
-    let data_a = TestData {
-        id: 55,
-        content: "Blocking Load Mut A".to_string(),
-    };
-    let data_b = TestData {
-        id: 56,
-        content: "Blocking Load Mut B".to_string(),
-    };
+    let data_a = TestData { id: 55, content: "Blocking Load Mut A".to_string() };
+    let data_b = TestData { id: 56, content: "Blocking Load Mut B".to_string() };
 
     // --- Setup: Insert A, write A, evict A ---
     let mut arc_a = Arc::new(setup.pool.insert(data_a.clone()));
@@ -1978,7 +1800,7 @@ async fn test_blocking_try_load_mut_triggers_load_if_not_cached() {
         // arc_a moved into closure
         let maybe_entry = Arc::get_mut(&mut arc_a);
         assert!(maybe_entry.is_some());
-        let mut guard = maybe_entry.unwrap().blocking_load_mut(); // This should trigger load 
+        let mut guard = maybe_entry.unwrap().blocking_load_mut(); // This should trigger load
         guard.content = "Mutated A after blocking load".to_string();
         drop(guard); // Deletes original temp file, assigns new key
         arc_a // Return mutated arc
@@ -1987,15 +1809,15 @@ async fn test_blocking_try_load_mut_triggers_load_if_not_cached() {
 
     // --- Verification ---
     wait_for_store(&setup.backing_store).await; // Wait for delete task
-    // load: 1 (A had to be loaded)
-    // delete: 1 (Original temp file deleted during blocking_try_load_mut)
+                                                // load: 1 (A had to be loaded)
+                                                // delete: 1 (Original temp file deleted during blocking_try_load_mut)
     assert_eq!(setup.calls.load.load(Ordering::SeqCst), 1);
     assert_eq!(setup.calls.delete.load(Ordering::SeqCst), 1);
 
     let new_key_a = arc_a_mutated.key();
     assert_ne!(original_key_a, new_key_a);
     assert!(!setup.store_impl.get_temp_keys().contains(&original_key_a)); // Original temp gone
-    // Store count shouldn't have increased unless B got re-evicted during A's load+mutate
+                                                                          // Store count shouldn't have increased unless B got re-evicted during A's load+mutate
     assert!(setup.calls.store.load(Ordering::SeqCst) <= stores_after_b_insert + 1);
 
     // --- Final check: Load content (blocking) ---
@@ -2008,7 +1830,7 @@ async fn test_blocking_try_load_mut_triggers_load_if_not_cached() {
 
     // --- Cleanup ---
     drop(arc_a_mutated); // Drop mutated arc (not written, no delete)
-    // _arc_b drops implicitly
+                         // _arc_b drops implicitly
     wait_for_store(&setup.backing_store).await;
     // Final delete count depends if B was stored. Should be >= 1.
     assert!(setup.calls.delete.load(Ordering::SeqCst) >= 1);
@@ -2018,14 +1840,8 @@ async fn test_blocking_try_load_mut_triggers_load_if_not_cached() {
 async fn test_load_triggers_blocking_load_if_not_cached() {
     // This test relies on block_in_place, hence the multi_thread flavor.
     let setup = setup(1); // Cache size 1 to easily force eviction
-    let data_a = TestData {
-        id: 600,
-        content: "Load A".to_string(),
-    };
-    let data_b = TestData {
-        id: 601,
-        content: "Load B".to_string(),
-    };
+    let data_a = TestData { id: 600, content: "Load A".to_string() };
+    let data_b = TestData { id: 601, content: "Load B".to_string() };
 
     // --- Setup: Insert A, write A, evict A ---
     let item_a = setup.pool.insert(data_a.clone());
@@ -2053,7 +1869,7 @@ async fn test_load_triggers_blocking_load_if_not_cached() {
 
     // --- Verification ---
     assert_eq!(*guard_a, data_a); // Verify data is correct
-    // load: 1 (Strategy::load should have been called via block_in_place)
+                                  // load: 1 (Strategy::load should have been called via block_in_place)
     assert_eq!(setup.calls.load.load(Ordering::SeqCst), 1);
 
     // --- Cleanup ---
@@ -2067,10 +1883,7 @@ async fn test_load_triggers_blocking_load_if_not_cached() {
 #[tokio::test(flavor = "multi_thread")] // Use multi_thread for consistency, though not strictly needed here
 async fn test_load_returns_from_cache_if_present() {
     let setup = setup(10); // Sufficient cache size
-    let data_a = TestData {
-        id: 610,
-        content: "Load Cached A".to_string(),
-    };
+    let data_a = TestData { id: 610, content: "Load Cached A".to_string() };
 
     // --- Setup: Insert A (it's now in cache) ---
     let arc_a = setup.pool.insert(data_a.clone());
@@ -2084,7 +1897,7 @@ async fn test_load_returns_from_cache_if_present() {
 
     // --- Verification ---
     assert_eq!(*guard_a, data_a); // Verify data is correct
-    // load: 0 (Strategy::load should NOT have been called)
+                                  // load: 0 (Strategy::load should NOT have been called)
     assert_eq!(setup.calls.load.load(Ordering::SeqCst), 0);
 
     // --- Cleanup ---
@@ -2097,10 +1910,7 @@ async fn test_load_returns_from_cache_if_present() {
 #[tokio::test] // No specific flavor needed, assuming try_load is non-blocking
 async fn test_try_load_success_when_cached() {
     let setup = setup(10); // Ensure space in cache
-    let data_a = TestData {
-        id: 700,
-        content: "Try Load Cached A".to_string(),
-    };
+    let data_a = TestData { id: 700, content: "Try Load Cached A".to_string() };
 
     // --- Setup: Insert A (it's now in cache) ---
     let item_a = setup.pool.insert(data_a.clone());
@@ -2113,7 +1923,7 @@ async fn test_try_load_success_when_cached() {
     assert!(maybe_guard.is_some()); // Expect success
     let guard = maybe_guard.unwrap();
     assert_eq!(*guard, data_a); // Verify data
-    // load: 0 (Strategy::load should NOT have been called)
+                                // load: 0 (Strategy::load should NOT have been called)
     assert_eq!(setup.calls.load.load(Ordering::SeqCst), 0);
 
     // --- Cleanup ---
@@ -2126,14 +1936,8 @@ async fn test_try_load_success_when_cached() {
 #[tokio::test]
 async fn test_try_load_fails_when_not_cached() {
     let setup = setup(1); // Cache size 1 to force eviction
-    let data_a = TestData {
-        id: 710,
-        content: "Try Load Evicted A".to_string(),
-    };
-    let data_b = TestData {
-        id: 711,
-        content: "Try Load Evictor B".to_string(),
-    };
+    let data_a = TestData { id: 710, content: "Try Load Evicted A".to_string() };
+    let data_b = TestData { id: 711, content: "Try Load Evictor B".to_string() };
 
     // --- Setup: Insert A, write A, evict A ---
     let item_a = setup.pool.insert(data_a.clone());
@@ -2156,7 +1960,7 @@ async fn test_try_load_fails_when_not_cached() {
 
     // --- Verification ---
     assert!(maybe_guard.is_none()); // Expect failure (None)
-    // load: 0 (Strategy::load should NOT have been called)
+                                    // load: 0 (Strategy::load should NOT have been called)
     assert_eq!(setup.calls.load.load(Ordering::SeqCst), 0);
 
     // --- Cleanup ---
@@ -2169,10 +1973,7 @@ async fn test_try_load_fails_when_not_cached() {
 #[tokio::test]
 async fn test_sync_try_load_mut_success_when_cached() {
     let setup = setup(10); // Cache size 10
-    let data_a = TestData {
-        id: 720,
-        content: "Sync Try Mut A".to_string(),
-    };
+    let data_a = TestData { id: 720, content: "Sync Try Mut A".to_string() };
 
     // --- Setup: Insert A, write A. A is cached and unique. ---
     let item_a = setup.pool.insert(data_a.clone());
@@ -2193,8 +1994,8 @@ async fn test_sync_try_load_mut_success_when_cached() {
 
     // --- Verification ---
     assert!(maybe_guard.is_some()); // Expect success
-    // load: 0 (No load needed, was cached)
-    // delete: 1 (Original temp file deleted)
+                                    // load: 0 (No load needed, was cached)
+                                    // delete: 1 (Original temp file deleted)
     wait_for_store(&setup.backing_store).await; // Wait for delete task
     assert_eq!(setup.calls.load.load(Ordering::SeqCst), 0);
     assert_eq!(setup.calls.delete.load(Ordering::SeqCst), 1);
@@ -2222,14 +2023,8 @@ async fn test_sync_try_load_mut_success_when_cached() {
 #[tokio::test]
 async fn test_sync_try_load_mut_fails_when_not_cached() {
     let setup = setup(1); // Cache size 1
-    let data_a = TestData {
-        id: 730,
-        content: "Sync Try Mut Evicted A".to_string(),
-    };
-    let data_b = TestData {
-        id: 731,
-        content: "Sync Try Mut Evictor B".to_string(),
-    };
+    let data_a = TestData { id: 730, content: "Sync Try Mut Evicted A".to_string() };
+    let data_b = TestData { id: 731, content: "Sync Try Mut Evictor B".to_string() };
 
     // --- Setup: Insert A, write A, evict A ---
     let item_a = setup.pool.insert(data_a.clone());
@@ -2251,13 +2046,10 @@ async fn test_sync_try_load_mut_fails_when_not_cached() {
     assert!(maybe_guard.is_none()); // Expect failure (None) because not cached
     drop(maybe_guard);
     assert_eq!(item_a.key(), original_key_a); // Key should not change
-    // load: 0 (try_load_mut doesn't load)
-    // delete: 0 (No delete occurred)
+                                              // load: 0 (try_load_mut doesn't load)
+                                              // delete: 0 (No delete occurred)
     assert_eq!(setup.calls.load.load(Ordering::SeqCst), 0);
-    assert_eq!(
-        setup.calls.delete.load(Ordering::SeqCst),
-        initial_delete_count
-    );
+    assert_eq!(setup.calls.delete.load(Ordering::SeqCst), initial_delete_count);
 
     // Cleanup
     drop(item_a); // A was stored, delete should happen
@@ -2270,10 +2062,7 @@ async fn test_register_same_persisted_key_twice() {
     let setup = setup(10); // Cache size doesn't matter much here
     let path = test_path_a();
     let key = Uuid::new_v4();
-    let data = TestData {
-        id: 800,
-        content: "Register Twice".to_string(),
-    };
+    let data = TestData { id: 800, content: "Register Twice".to_string() };
 
     // --- Setup: Simulate item already persisted ---
     setup.store_impl._add_persisted(&path, key, data.clone());
@@ -2357,10 +2146,7 @@ async fn test_blocking_register_same_persisted_key_twice() {
     let setup = setup(10);
     let path = test_path_b(); // Use different path
     let key = Uuid::new_v4();
-    let data = TestData {
-        id: 801,
-        content: "Blocking Register Twice".to_string(),
-    };
+    let data = TestData { id: 801, content: "Blocking Register Twice".to_string() };
 
     setup.store_impl._add_persisted(&path, key, data.clone());
     setup.calls.store.store(0, Ordering::SeqCst);
@@ -2417,10 +2203,7 @@ async fn test_blocking_register_same_persisted_key_twice() {
 async fn test_async_make_mut_unique_no_clone() {
     let setup = setup(10);
     // Ensure data is Clone, though it shouldn't be used here
-    let data_a = TestData {
-        id: 900,
-        content: "Async Make Mut Unique".to_string(),
-    };
+    let data_a = TestData { id: 900, content: "Async Make Mut Unique".to_string() };
 
     // --- Setup: Insert A, write A. A is cached and unique. ---
     let arc_a = Arc::new(setup.pool.insert(data_a.clone()));
@@ -2479,15 +2262,9 @@ async fn test_try_load_fails_while_store_is_running_for_eviction() {
     );
     // --- USE SETUP WITH SLEEP ---
     let setup = setup_with_store_sleep(1, sleep_duration); // Cache size 1, 50ms sleep
-    // ----------------------------
-    let data_a = TestData {
-        id: 960,
-        content: "Eviction Target A Sleep".to_string(),
-    };
-    let data_b = TestData {
-        id: 961,
-        content: "Evictor B Sleep".to_string(),
-    };
+                                                           // ----------------------------
+    let data_a = TestData { id: 960, content: "Eviction Target A Sleep".to_string() };
+    let data_b = TestData { id: 961, content: "Evictor B Sleep".to_string() };
 
     // Insert A - cached
     let item_a = setup.pool.insert(data_a.clone());
@@ -2534,15 +2311,9 @@ async fn test_sync_try_load_mut_fails_while_store_is_running_for_eviction() {
     );
     // --- USE SETUP WITH SLEEP ---
     let setup = setup_with_store_sleep(1, sleep_duration); // Cache size 1, 50ms sleep
-    // ----------------------------
-    let data_a = TestData {
-        id: 970,
-        content: "Eviction Target Mut A Sleep".to_string(),
-    };
-    let data_b = TestData {
-        id: 971,
-        content: "Evictor Mut B Sleep".to_string(),
-    };
+                                                           // ----------------------------
+    let data_a = TestData { id: 970, content: "Eviction Target Mut A Sleep".to_string() };
+    let data_b = TestData { id: 971, content: "Evictor Mut B Sleep".to_string() };
 
     // Insert A - cached and unique
     let mut item_a = setup.pool.insert(data_a.clone());
@@ -2595,15 +2366,9 @@ async fn test_item_dropped_during_eviction_write_triggers_delete() {
     );
     // --- USE SETUP WITH SLEEP ---
     let setup = setup_with_store_sleep(1, sleep_duration); // Cache size 1, 100ms sleep
-    // ----------------------------
-    let data_a = TestData {
-        id: 980,
-        content: "Drop During Store A".to_string(),
-    };
-    let data_b = TestData {
-        id: 981,
-        content: "Drop During Store B".to_string(),
-    };
+                                                           // ----------------------------
+    let data_a = TestData { id: 980, content: "Drop During Store A".to_string() };
+    let data_b = TestData { id: 981, content: "Drop During Store B".to_string() };
 
     // Insert A - cached and unique
     let item_a = setup.pool.insert(data_a.clone());
