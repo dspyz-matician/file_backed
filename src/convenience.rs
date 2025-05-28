@@ -120,10 +120,8 @@ pub fn blocking_save_with<B: BackingStoreT, R, E>(
     };
     persist_arcs(&mut persister)?;
     let new_keys_set = persister.new_keys_set;
-    runtime.block_on(async move {
-        let _: Vec<()> = persister.join_set.join_all().await;
-        store.sync(tracked).await.unwrap();
-    });
+    let _: Vec<()> = runtime.block_on(persister.join_set.join_all());
+    store.blocking_sync(tracked.path());
     let output = change_key()?;
     assert!(max_simultaneous_tasks > 0);
     let mut join_set = JoinSet::new();
