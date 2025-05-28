@@ -108,8 +108,24 @@ pub fn blocking_save_with<B: BackingStoreT, R, E>(
     runtime: &tokio::runtime::Handle,
     change_key: impl FnOnce() -> Result<R, E>,
 ) -> Result<R, E> {
+    let mut old_keys = tracked.all_keys();
+    let new_keys_set = prepare_save(store, persist_arcs, tracked, max_simultaneous_tasks, runtime)?;
+    store.blocking_sync(tracked.path());
+    let output = change_key()?;
+    old_keys.retain(|key| !new_keys_set.contains(key));
+    post_save_cleanup(store, tracked, max_simultaneous_tasks, runtime, &old_keys);
+    Ok(output)
+}
+
+/// Helper function for implementing `blocking_save_with`. This collects the keys that we want to retain.
+pub fn prepare_save<B: BackingStoreT, E>(
+    store: &Arc<BackingStore<B>>,
+    persist_arcs: impl FnOnce(&mut Persister<B>) -> Result<(), E>,
+    tracked: &Arc<TrackedPath<B::PersistPath>>,
+    max_simultaneous_tasks: usize,
+    runtime: &tokio::runtime::Handle,
+) -> Result<HashSet<Uuid>, E> {
     assert!(max_simultaneous_tasks > 0);
-    let old_keys = tracked.all_keys();
     let mut persister = Persister {
         backing_store: Arc::clone(store),
         tracked: Arc::clone(tracked),
@@ -121,14 +137,20 @@ pub fn blocking_save_with<B: BackingStoreT, R, E>(
     persist_arcs(&mut persister)?;
     let new_keys_set = persister.new_keys_set;
     let _: Vec<()> = runtime.block_on(persister.join_set.join_all());
-    store.blocking_sync(tracked.path());
-    let output = change_key()?;
+    Ok(new_keys_set)
+}
+
+/// Helper function for implementing `blocking_save_with`. This deletes the keys that are no longer referenced
+pub fn post_save_cleanup<B: BackingStoreT>(
+    store: &Arc<BackingStore<B>>,
+    tracked: &Arc<TrackedPath<B::PersistPath>>,
+    max_simultaneous_tasks: usize,
+    runtime: &tokio::runtime::Handle,
+    keys_to_delete: &[Uuid],
+) {
     assert!(max_simultaneous_tasks > 0);
     let mut join_set = JoinSet::new();
-    for key in old_keys {
-        if new_keys_set.contains(&key) {
-            continue;
-        }
+    for &key in keys_to_delete {
         if join_set.len() == max_simultaneous_tasks {
             runtime.block_on(join_set.join_next()).unwrap().unwrap();
         }
@@ -147,7 +169,6 @@ pub fn blocking_save_with<B: BackingStoreT, R, E>(
         );
     }
     let _: Vec<()> = runtime.block_on(join_set.join_all());
-    Ok(output)
 }
 
 /// A helper struct used within the `persist_arcs` closure of `blocking_save_with`.
