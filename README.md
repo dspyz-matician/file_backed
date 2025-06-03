@@ -36,19 +36,18 @@ This example shows basic insertion, loading (which may come from cache or disk),
 use std::sync::Arc;
 
 use tempfile::tempdir;
-use tokio::runtime;
+use tokio::runtime::Handle;
 
 use file_backed::fbstore::{BinCodec, FBStore, PreparedPath};
 use file_backed::{BackingStore, FBPool};
 
-fn main() -> anyhow::Result<()> {
-    let runtime = runtime::Builder::new_multi_thread().build()?;
-
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     // 1. Setup store and pool
     let temp_dir = tempdir()?;
-    let prepared_path = PreparedPath::blocking_new(temp_dir.path().to_path_buf(), vec![]);
+    let prepared_path = PreparedPath::new(temp_dir.path().to_path_buf(), vec![]).await;
     let fb_store = FBStore::new(BinCodec, prepared_path); // Uses BinCodec for String
-    let store = Arc::new(BackingStore::new(fb_store, runtime.handle().clone()));
+    let store = Arc::new(BackingStore::new(fb_store, Handle::current()));
     let pool: Arc<FBPool<String, _>> = Arc::new(FBPool::new(store.clone(), 2)); // Cache size 2
 
     // 2. Insert items
@@ -58,15 +57,14 @@ fn main() -> anyhow::Result<()> {
     items.push(pool.insert("!".to_string())); // "Hello" starts being evicted now
 
     // 3. Load an item (might load from disk if evicted)
-    let guard = items[0].blocking_load(); // Load "Hello". Now "World" will be evicted.
+    let guard = items[0].load().await; // Load "Hello". Now "World" will be evicted.
     println!("Loaded: {}", *guard);
     assert_eq!(*guard, "Hello");
     drop(guard);
 
     // 4. Arcs automatically cleaned up when dropped
     drop(items);
-
-    runtime.block_on(store.finished());
+    store.finished().await; // Wait for background tasks to finish (e.g., file deletions)
 
     Ok(())
 }
@@ -82,14 +80,13 @@ Items can be persisted to survive application restarts using `persist` and broug
 use std::sync::Arc;
 
 use tempfile::tempdir;
-use tokio::runtime;
+use tokio::runtime::Handle;
 
 use file_backed::fbstore::{BinCodec, FBStore, PreparedPath};
 use file_backed::{BackingStore, FBPool};
 
-fn main() -> anyhow::Result<()> {
-    let runtime = runtime::Builder::new_multi_thread().build()?;
-
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     // 1. Setup distinct paths for cache and persistent storage
     let cache_dir = tempdir()?;
     let persist_dir = tempdir()?;
@@ -102,54 +99,56 @@ fn main() -> anyhow::Result<()> {
 
     // --- Scope 1: Insert and Persist ---
     {
-        let prepared_cache_path = PreparedPath::blocking_new(cache_store_path.clone(), vec![]);
-        let prepared_persist_path = PreparedPath::blocking_new(persist_store_path.clone(), vec![]);
+        let prepared_cache_path = PreparedPath::new(cache_store_path.clone(), vec![]).await;
+        let prepared_persist_path = PreparedPath::new(persist_store_path.clone(), vec![]).await;
 
         let fb_store = FBStore::new(BinCodec, prepared_cache_path);
-        let store = Arc::new(BackingStore::new(fb_store, runtime.handle().clone()));
+        let store = Arc::new(BackingStore::new(fb_store, Handle::current()));
         let pool: Arc<FBPool<String, _>> = Arc::new(FBPool::new(store.clone(), 1));
 
         // Track persistent path & insert
-        let tracked_persist = Arc::new(store.blocking_track_path(prepared_persist_path));
+        let tracked_persist = Arc::new(store.track_path(prepared_persist_path).await?);
         let item1 = pool.insert("Persisted Data".to_string());
         persisted_key = item1.key(); // Remember the key
 
         // Persist (e.g., hard-links to persist_dir)
-        item1.blocking_persist(&tracked_persist);
+        item1.spawn_persist(&tracked_persist).await?;
         // Optional: store.sync(tracked_persist).await?; // For durability
 
         println!("Persisted item with key: {}", persisted_key);
-
-        runtime.block_on(store.finished());
+        // item1, pool, store dropped here; cache file might be deleted later
+        store.finished().await;
     }
 
     // --- Scope 2: Simulate Restart, Register, and Load ---
     {
         // Re-create store/pool pointing to the same paths
-        let prepared_cache_path = PreparedPath::blocking_new(cache_store_path, vec![]);
-        let prepared_persist_path = PreparedPath::blocking_new(persist_store_path, vec![]); // Must exist
+        let prepared_cache_path = PreparedPath::new(cache_store_path, vec![]).await;
+        let prepared_persist_path = PreparedPath::new(persist_store_path, vec![]).await; // Must exist
 
         let fb_store = FBStore::new(BinCodec, prepared_cache_path);
-        let store = Arc::new(BackingStore::new(fb_store, runtime.handle().clone()));
+        let store = Arc::new(BackingStore::new(fb_store, Handle::current()));
         let pool: Arc<FBPool<String, _>> = Arc::new(FBPool::new(store.clone(), 1));
 
         // Re-track persistent path
-        let tracked_persist = Arc::new(store.blocking_track_path(prepared_persist_path));
+        let tracked_persist = Arc::new(store.track_path(prepared_persist_path).await?);
 
         // Register the previously persisted item by its key
         let registered_item = pool
-            .blocking_register(&tracked_persist, persisted_key)
+            .register(&tracked_persist, persisted_key)
+            .await
             .expect("Failed to register item");
 
         println!("Registered item with key: {}", persisted_key);
 
         // Load the registered item (loads from persist_dir link into cache_dir)
-        let guard = registered_item.blocking_load();
+        let guard = registered_item.load();
         println!("Loaded registered data: {}", *guard);
         assert_eq!(*guard, "Persisted Data");
         drop(guard);
 
-        runtime.block_on(store.finished());
+        // registered_item, pool, store dropped here
+        store.finished().await;
     }
 
     Ok(())
