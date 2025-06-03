@@ -1,6 +1,6 @@
 [package]
 name = "file_backed"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2024"
 license = "MIT"
 documentation = "https://docs.rs/file_backed"
