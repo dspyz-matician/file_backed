@@ -6,7 +6,10 @@ use std::{
 use consume_on_drop::{Consume, ConsumeOnDrop};
 use cutoff_list::CutoffList;
 use parking_lot::RwLock;
-use tokio::sync::{RwLockMappedWriteGuard, RwLockReadGuard};
+use tokio::{
+    sync::{RwLockMappedWriteGuard, RwLockReadGuard},
+    task::JoinHandle,
+};
 
 use uuid::Uuid;
 
@@ -327,11 +330,31 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> Fb<T, B> {
         }
     }
 
+    /// Spawns a background task to immediately write the data to the backing store's
+    /// temporary location if it isn't already there.
+    ///
+    /// Returns a `JoinHandle` that completes when the write operation finishes.
+    /// This is useful for initiating writes without blocking.
+    pub fn spawn_write_now(&self) -> JoinHandle<()> {
+        self.entry.spawn_write_now(&self.inner.pool.store)
+    }
+
     /// Performs a blocking write of the data to the backing store's temporary location
     /// if it is isn't already there. Waits for the write to complete.
     /// Must not be called from an async context that isn't allowed to block.
     pub fn blocking_write_now(&self) {
         self.entry.blocking_write_now(&self.inner.pool.store);
+    }
+
+    /// Spawns a background task to persist the data to the specified `TrackedPath`.
+    ///
+    /// This calls `BackingStoreT::persist` (typically a hard-link). If the data
+    /// is currently only in memory, it ensures it's written to the temporary
+    /// location first before attempting persistence.
+    /// If the data is already in the persistent location, this is a no-op.
+    /// Returns a `JoinHandle` that completes when the persistence operation finishes.
+    pub fn spawn_persist(&self, path: &Arc<TrackedPath<B::PersistPath>>) -> JoinHandle<()> {
+        self.entry.spawn_persist(&self.inner.pool.store, path)
     }
 
     /// Performs a blocking persistence of the data to the specified `TrackedPath`.
