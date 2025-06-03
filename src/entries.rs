@@ -245,13 +245,14 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
         RwLockWriteGuard::map(guard, |b| b.memory.as_mut().unwrap())
     }
 
-    pub(super) fn spawn_write_now(&self, store: &Arc<BackingStore<B>>) -> JoinHandle<()> {
-        let backing = Arc::clone(&self.backing);
-        let meta = Arc::clone(&self.meta);
-        let store_clone = Arc::clone(store);
-        store.spawn_blocking(move || {
-            let guard = backing.blocking_read();
-            guard.blocking_store(&store_clone, *meta.key.try_read().unwrap());
+    pub(super) async fn spawn_write_now(&self, store: &Arc<BackingStore<B>>) -> JoinHandle<()> {
+        let read_guard = Arc::clone(&self.backing).read_owned().await;
+        let key = self.key();
+        store.spawn_blocking({
+            let store = Arc::clone(store);
+            move || {
+                read_guard.blocking_store(&store, key);
+            }
         })
     }
 
@@ -260,17 +261,21 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
         read_guard.blocking_store(store, self.key());
     }
 
-    pub(super) fn spawn_persist(
+    pub(super) async fn spawn_persist(
         &self,
         store: &Arc<BackingStore<B>>,
         path: &Arc<TrackedPath<B::PersistPath>>,
     ) -> JoinHandle<()> {
-        let backing = Arc::clone(&self.backing);
-        let meta = Arc::clone(&self.meta);
-        let store_clone = Arc::clone(store);
-        let path = Arc::clone(path);
-        store.spawn_blocking(move || {
-            blocking_persist(&backing, &store_clone, &meta, &path);
+        let guard = Arc::clone(&self.backing).read_owned().await;
+        let key = self.key();
+        store.spawn_blocking({
+            let store = Arc::clone(store);
+            let path = Arc::clone(path);
+            move || {
+                let token = Arc::clone(guard.blocking_store(&store, key));
+                drop(guard);
+                store.persist(&token, &path);
+            }
         })
     }
 

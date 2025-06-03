@@ -333,10 +333,10 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> Fb<T, B> {
     /// Spawns a background task to immediately write the data to the backing store's
     /// temporary location if it isn't already there.
     ///
-    /// Returns a `JoinHandle` that completes when the write operation finishes.
-    /// This is useful for initiating writes without blocking.
-    pub fn spawn_write_now(&self) -> JoinHandle<()> {
-        self.entry.spawn_write_now(&self.inner.pool.store)
+    /// Acquires the read guard and then returns a `JoinHandle` that completes when the write
+    /// operation finishes.
+    pub async fn spawn_write_now(&self) -> JoinHandle<()> {
+        self.entry.spawn_write_now(&self.inner.pool.store).await
     }
 
     /// Performs a blocking write of the data to the backing store's temporary location
@@ -352,9 +352,11 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> Fb<T, B> {
     /// is currently only in memory, it ensures it's written to the temporary
     /// location first before attempting persistence.
     /// If the data is already in the persistent location, this is a no-op.
-    /// Returns a `JoinHandle` that completes when the persistence operation finishes.
-    pub fn spawn_persist(&self, path: &Arc<TrackedPath<B::PersistPath>>) -> JoinHandle<()> {
-        self.entry.spawn_persist(&self.inner.pool.store, path)
+    ///
+    /// Acquires the read guard and then returns a `JoinHandle` that completes when the persistence
+    /// operation finishes.
+    pub async fn spawn_persist(&self, path: &Arc<TrackedPath<B::PersistPath>>) -> JoinHandle<()> {
+        self.entry.spawn_persist(&self.inner.pool.store, path).await
     }
 
     /// Performs a blocking persistence of the data to the specified `TrackedPath`.

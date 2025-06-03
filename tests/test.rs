@@ -381,7 +381,7 @@ async fn test_write_now_triggers_store_drop_triggers_delete() {
     assert!(!setup.store_impl.get_temp_keys().contains(&key1)); // Not written yet
 
     // --- Action: Explicit Write ---
-    let write_handle = arc1.spawn_write_now(); // Use async version
+    let write_handle = arc1.spawn_write_now().await; // Use async version
     write_handle.await.unwrap();
     // --- Verification ---
     // store: 1 (Written explicitly)
@@ -392,7 +392,7 @@ async fn test_write_now_triggers_store_drop_triggers_delete() {
     assert!(setup.store_impl.get_temp_keys().contains(&key1));
 
     // --- Action: Write again (should be no-op for store) ---
-    let write_handle2 = arc1.spawn_write_now();
+    let write_handle2 = arc1.spawn_write_now().await;
     write_handle2.await.unwrap();
     // --- Verification ---
     // store: 1 (Already written, no new store call)
@@ -504,7 +504,7 @@ async fn test_persist_triggers_store_if_not_written_noop_if_done() {
     assert!(!tracked_path.all_keys().contains(&key));
 
     // --- Action: Persist (first time, not written yet, not persisted yet) ---
-    let persist_handle = arc.spawn_persist(&tracked_path);
+    let persist_handle = arc.spawn_persist(&tracked_path).await;
     persist_handle.await.unwrap();
     // --- Verification ---
     // store: 1 (Writes to temp first)
@@ -526,7 +526,7 @@ async fn test_persist_triggers_store_if_not_written_noop_if_done() {
     // checks the TrackedPath passed in. Let's assume it checks the path.
 
     // --- Action: Persist Again (already written to temp, *and* already persisted at path) ---
-    let persist_handle2 = arc.spawn_persist(&tracked_path); // Use same tracked_path
+    let persist_handle2 = arc.spawn_persist(&tracked_path).await; // Use same tracked_path
     persist_handle2.await.unwrap();
     // --- Verification ---
     // store: 1 (No new store call needed)
@@ -596,7 +596,7 @@ async fn test_persist_is_noop_if_already_persisted() {
     setup.calls.register.store(0, Ordering::SeqCst); // Reset this too
 
     // --- Action: Persist (item is already known persisted at this path) ---
-    let persist_handle = arc.spawn_persist(&tracked_path);
+    let persist_handle = arc.spawn_persist(&tracked_path).await;
     persist_handle.await.unwrap();
 
     // --- Verification ---
@@ -643,7 +643,7 @@ async fn test_try_load_mut_unique_deletes_original_temp() {
     let original_key = item.key();
 
     // --- Action: Write original to temp store ---
-    let write_handle = item.spawn_write_now();
+    let write_handle = item.spawn_write_now().await;
     write_handle.await.unwrap();
     // store: 1, delete: 0
     assert_eq!(setup.calls.store.load(Ordering::SeqCst), 1);
@@ -727,7 +727,7 @@ async fn test_make_mut_shared_clones_no_delete_during_call() {
     let original_key = arc1.key();
 
     // --- Action: Write original ---
-    let write_handle = arc1.spawn_write_now();
+    let write_handle = arc1.spawn_write_now().await;
     write_handle.await.unwrap();
     // store: 1, delete: 0
     assert_eq!(setup.calls.store.load(Ordering::SeqCst), 1);
@@ -1100,7 +1100,7 @@ async fn test_try_load_mut_triggers_load_if_not_cached() {
     // --- Action: Insert A, Write A ---
     let mut item_a = setup.pool.insert(data_a.clone());
     let original_key_a = item_a.key();
-    let write_handle = item_a.spawn_write_now();
+    let write_handle = item_a.spawn_write_now().await;
     write_handle.await.unwrap(); // A is now in temp store
     // store: 1, load: 0, delete: 0
     assert_eq!(setup.calls.store.load(Ordering::SeqCst), 1);
@@ -1997,7 +1997,7 @@ async fn test_load_triggers_blocking_load_if_not_cached() {
     let key_a = arc_a.key();
 
     // Write A to temp store so it's loadable after eviction
-    let write_handle = arc_a.spawn_write_now(); // Use async version for setup convenience
+    let write_handle = arc_a.spawn_write_now().await; // Use async version for setup convenience
     write_handle.await.unwrap();
     assert_eq!(setup.calls.store.load(Ordering::SeqCst), 1); // A stored
     assert!(setup.store_impl.get_temp_keys().contains(&key_a));
@@ -2100,7 +2100,7 @@ async fn test_try_load_fails_when_not_cached() {
     // --- Setup: Insert A, write A, evict A ---
     let item_a = setup.pool.insert(data_a.clone());
     // Write A to temp store so it *could* be loaded, but won't be by try_load
-    let write_handle = item_a.spawn_write_now();
+    let write_handle = item_a.spawn_write_now().await;
     write_handle.await.unwrap();
     assert_eq!(setup.calls.store.load(Ordering::SeqCst), 1);
 
@@ -2137,7 +2137,7 @@ async fn test_sync_try_load_mut_success_when_cached() {
     let mut item_a = setup.pool.insert(data_a.clone());
     let original_key_a = item_a.key();
     // Write A so delete behavior can be verified
-    let write_handle = item_a.spawn_write_now();
+    let write_handle = item_a.spawn_write_now().await;
     write_handle.await.unwrap();
     assert_eq!(setup.calls.store.load(Ordering::SeqCst), 1);
     assert!(setup.store_impl.get_temp_keys().contains(&original_key_a));
@@ -2190,7 +2190,7 @@ async fn test_sync_try_load_mut_fails_when_not_cached() {
     // --- Setup: Insert A, write A, evict A ---
     let mut item_a = setup.pool.insert(data_a.clone());
     let original_key_a = item_a.key();
-    let write_handle = item_a.spawn_write_now();
+    let write_handle = item_a.spawn_write_now().await;
     write_handle.await.unwrap(); // A is in temp store
     let _arc_b = setup.pool.insert(data_b.clone()); // Evict A
     wait_for_store(&setup.backing_store).await;
@@ -2379,7 +2379,7 @@ async fn test_async_make_mut_unique_no_clone() {
     let mut arc_a = Arc::new(setup.pool.insert(data_a.clone()));
     let original_key_a = arc_a.key();
     // Write A so delete behavior can be verified
-    let write_handle = arc_a.spawn_write_now();
+    let write_handle = arc_a.spawn_write_now().await;
     write_handle.await.unwrap();
     assert_eq!(setup.calls.store.load(Ordering::SeqCst), 1);
     assert!(setup.store_impl.get_temp_keys().contains(&original_key_a));

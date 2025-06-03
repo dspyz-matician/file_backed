@@ -112,7 +112,7 @@ async fn main() -> anyhow::Result<()> {
         persisted_key = item1.key(); // Remember the key
 
         // Persist (e.g., hard-links to persist_dir)
-        item1.spawn_persist(&tracked_persist).await?;
+        item1.spawn_persist(&tracked_persist).await.await?;
         // Optional: store.sync(tracked_persist).await?; // For durability
 
         println!("Persisted item with key: {}", persisted_key);

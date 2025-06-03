@@ -68,8 +68,6 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> Fb<T, B> {
 /// * `tracked`: The target persistent path information.
 /// * `max_simultaneous_tasks`: Controls the parallelism of the persist operations.
 /// * `runtime`: A tokio runtime handle on which to spawn the persist/delete tasks.
-///   If this is the same as the one used to create the `BackingStore`, `max_simultaneous_tasks`
-///   must be _less than_ the maximum number of blocking tasks to avoid potential deadlocks.
 /// * `change_key`: A closure executed *after* all persists succeed but *before* cleanup.
 ///   It should perform the atomic update of the external state.
 ///
@@ -133,13 +131,7 @@ pub fn blocking_save_with<B: BackingStoreT, R, E>(
     change_key: impl FnOnce() -> Result<R, E>,
 ) -> Result<R, E> {
     let mut old_keys = tracked.all_keys();
-    let new_keys_set = prepare_save(
-        store,
-        persist_arcs,
-        tracked,
-        max_simultaneous_tasks,
-        runtime,
-    )?;
+    let new_keys_set = prepare_save(persist_arcs, tracked, max_simultaneous_tasks, runtime)?;
     store.blocking_sync(tracked.path());
     let output = change_key()?;
     old_keys.retain(|key| !new_keys_set.contains(key));
@@ -149,7 +141,6 @@ pub fn blocking_save_with<B: BackingStoreT, R, E>(
 
 /// Helper function for implementing `blocking_save_with`. This collects the keys that we want to retain.
 pub fn prepare_save<B: BackingStoreT, E>(
-    store: &Arc<BackingStore<B>>,
     persist_arcs: impl FnOnce(&mut Persister<B>) -> Result<(), E>,
     tracked: &Arc<TrackedPath<B::PersistPath>>,
     max_simultaneous_tasks: usize,
@@ -157,7 +148,6 @@ pub fn prepare_save<B: BackingStoreT, E>(
 ) -> Result<HashSet<Uuid>, E> {
     assert!(max_simultaneous_tasks > 0);
     let mut persister = Persister {
-        backing_store: Arc::clone(store),
         tracked: Arc::clone(tracked),
         join_set: JoinSet::new(),
         new_keys_set: HashSet::new(),
@@ -207,7 +197,6 @@ pub fn post_save_cleanup<B: BackingStoreT>(
 /// A helper struct used within the `persist_arcs` closure of `blocking_save_with`.
 /// It collects the `Arc<Fb>` handles that need to be persisted.
 pub struct Persister<B: BackingStoreT> {
-    backing_store: Arc<BackingStore<B>>,
     tracked: Arc<TrackedPath<B::PersistPath>>,
     join_set: JoinSet<()>,
     new_keys_set: HashSet<Uuid>,
@@ -231,15 +220,8 @@ impl<B: BackingStoreT> Persister<B> {
         let tracked = Arc::clone(&self.tracked);
         self.new_keys_set.insert(arc.key());
         let arc = Arc::clone(arc);
-        let task_tracker = self.backing_store.task_tracker().clone();
-        let runtime_clone = self.runtime.clone();
         self.join_set.spawn_on(
-            async move {
-                task_tracker
-                    .spawn_blocking_on(move || arc.blocking_persist(&tracked), &runtime_clone)
-                    .await
-                    .unwrap()
-            },
+            async move { arc.spawn_persist(&tracked).await.await.unwrap() },
             &self.runtime,
         );
     }
