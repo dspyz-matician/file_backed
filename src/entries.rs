@@ -245,9 +245,38 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
         RwLockWriteGuard::map(guard, |b| b.memory.as_mut().unwrap())
     }
 
+    pub(super) async fn spawn_write_now(&self, store: &Arc<BackingStore<B>>) -> JoinHandle<()> {
+        let read_guard = Arc::clone(&self.backing).read_owned().await;
+        let key = self.key();
+        store.spawn_blocking({
+            let store = Arc::clone(store);
+            move || {
+                read_guard.blocking_store(&store, key);
+            }
+        })
+    }
+
     pub(super) fn blocking_write_now(&self, store: &Arc<BackingStore<B>>) {
         let read_guard = self.backing.blocking_read();
         read_guard.blocking_store(store, self.key());
+    }
+
+    pub(super) async fn spawn_persist(
+        &self,
+        store: &Arc<BackingStore<B>>,
+        path: &Arc<TrackedPath<B::PersistPath>>,
+    ) -> JoinHandle<()> {
+        let guard = Arc::clone(&self.backing).read_owned().await;
+        let key = self.key();
+        store.spawn_blocking({
+            let store = Arc::clone(store);
+            let path = Arc::clone(path);
+            move || {
+                let token = Arc::clone(guard.blocking_store(&store, key));
+                drop(guard);
+                store.persist(&token, &path);
+            }
+        })
     }
 
     pub(super) fn blocking_persist(

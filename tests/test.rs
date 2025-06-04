@@ -376,16 +376,13 @@ async fn test_write_now_triggers_store_drop_triggers_delete() {
         content: "write_now_delete".to_string(),
     };
 
-    let item1 = setup.pool.insert(data1.clone());
-    let key1 = item1.key();
+    let arc1 = setup.pool.insert(data1.clone());
+    let key1 = arc1.key();
     assert!(!setup.store_impl.get_temp_keys().contains(&key1)); // Not written yet
 
     // --- Action: Explicit Write ---
-    let write_handle = tokio::task::spawn_blocking(move || {
-        item1.blocking_write_now();
-        item1
-    });
-    let item1 = write_handle.await.unwrap();
+    let write_handle = arc1.spawn_write_now().await; // Use async version
+    write_handle.await.unwrap();
     // --- Verification ---
     // store: 1 (Written explicitly)
     // load: 0
@@ -395,17 +392,14 @@ async fn test_write_now_triggers_store_drop_triggers_delete() {
     assert!(setup.store_impl.get_temp_keys().contains(&key1));
 
     // --- Action: Write again (should be no-op for store) ---
-    let write_handle2 = tokio::task::spawn_blocking(move || {
-        item1.blocking_write_now();
-        item1
-    });
-    let item1 = write_handle2.await.unwrap();
+    let write_handle2 = arc1.spawn_write_now().await;
+    write_handle2.await.unwrap();
     // --- Verification ---
     // store: 1 (Already written, no new store call)
     assert_eq!(setup.calls.store.load(Ordering::SeqCst), 1);
 
     // --- Action: Drop Arc ---
-    drop(item1);
+    drop(arc1);
     wait_for_store(&setup.backing_store).await;
     // --- Verification ---
     // delete: 1 (Item was written to temp store)
@@ -492,8 +486,8 @@ async fn test_persist_triggers_store_if_not_written_noop_if_done() {
     let persist_path = test_path_b();
 
     // --- Action: Insert ---
-    let item = setup.pool.insert(data.clone());
-    let key = item.key();
+    let arc = setup.pool.insert(data.clone());
+    let key = arc.key();
     assert_eq!(setup.calls.store.load(Ordering::SeqCst), 0);
     assert_eq!(setup.calls.persist.load(Ordering::SeqCst), 0);
     assert!(!setup.store_impl.get_temp_keys().contains(&key));
@@ -510,14 +504,8 @@ async fn test_persist_triggers_store_if_not_written_noop_if_done() {
     assert!(!tracked_path.all_keys().contains(&key));
 
     // --- Action: Persist (first time, not written yet, not persisted yet) ---
-    let persist_handle = tokio::task::spawn_blocking({
-        let tracked_path = tracked_path.clone();
-        move || {
-            item.blocking_persist(&tracked_path);
-            item
-        }
-    });
-    let item = persist_handle.await.unwrap();
+    let persist_handle = arc.spawn_persist(&tracked_path).await;
+    persist_handle.await.unwrap();
     // --- Verification ---
     // store: 1 (Writes to temp first)
     // persist: 1 (BackingStoreT::persist called)
@@ -538,14 +526,8 @@ async fn test_persist_triggers_store_if_not_written_noop_if_done() {
     // checks the TrackedPath passed in. Let's assume it checks the path.
 
     // --- Action: Persist Again (already written to temp, *and* already persisted at path) ---
-    let persist_handle2 = tokio::task::spawn_blocking({
-        let tracked_path = tracked_path.clone();
-        move || {
-            item.blocking_persist(&tracked_path);
-            item
-        }
-    }); // Use same tracked_path
-    let item = persist_handle2.await.unwrap();
+    let persist_handle2 = arc.spawn_persist(&tracked_path).await; // Use same tracked_path
+    persist_handle2.await.unwrap();
     // --- Verification ---
     // store: 1 (No new store call needed)
     // persist: 1 (NO-OP: Already persisted at the target path) <--- CHANGE HERE
@@ -553,7 +535,7 @@ async fn test_persist_triggers_store_if_not_written_noop_if_done() {
     assert_eq!(setup.calls.persist.load(Ordering::SeqCst), 1); // Count remains 1
 
     // --- Action: Drop Arc ---
-    drop(item);
+    drop(arc);
     wait_for_store(&setup.backing_store).await;
     // --- Verification ---
     // delete: 1 (Item was written to temp store)
@@ -605,8 +587,8 @@ async fn test_persist_is_noop_if_already_persisted() {
     assert_eq!(setup.calls.all_persisted_keys.load(Ordering::SeqCst), 1);
 
     // --- Action: Register the Arc ---
-    let maybe_item = setup.pool.register(&tracked_path, key).await;
-    let item = maybe_item.unwrap();
+    let maybe_arc = setup.pool.register(&tracked_path, key).await;
+    let arc = maybe_arc.unwrap();
     // Reset calls after setup phase
     setup.calls.store.store(0, Ordering::SeqCst);
     setup.calls.persist.store(0, Ordering::SeqCst);
@@ -614,14 +596,8 @@ async fn test_persist_is_noop_if_already_persisted() {
     setup.calls.register.store(0, Ordering::SeqCst); // Reset this too
 
     // --- Action: Persist (item is already known persisted at this path) ---
-    let persist_handle = tokio::task::spawn_blocking({
-        let tracked_path = tracked_path.clone();
-        move || {
-            item.blocking_persist(&tracked_path);
-            item
-        }
-    });
-    let item = persist_handle.await.unwrap();
+    let persist_handle = arc.spawn_persist(&tracked_path).await;
+    persist_handle.await.unwrap();
 
     // --- Verification ---
     // store: 0 (No-op)
@@ -630,14 +606,14 @@ async fn test_persist_is_noop_if_already_persisted() {
     assert_eq!(setup.calls.persist.load(Ordering::SeqCst), 0);
 
     // --- Action: Load (just to double check item is valid) ---
-    let guard = item.load().await;
+    let guard = arc.load().await;
     assert_eq!(*guard, data);
     drop(guard);
     // load: 1 (First load triggers Strategy::load because register doesn't load)
     assert_eq!(setup.calls.load.load(Ordering::SeqCst), 1);
 
     // --- Action: Drop Arc ---
-    drop(item);
+    drop(arc);
     wait_for_store(&setup.backing_store).await;
     // --- Verification ---
     // delete: 1 (Mock register simulates adding to temp store)
@@ -663,15 +639,12 @@ async fn test_try_load_mut_unique_deletes_original_temp() {
         content: "mutate_unique_del".to_string(),
     };
 
-    let item = setup.pool.insert(data.clone());
+    let mut item = setup.pool.insert(data.clone());
     let original_key = item.key();
 
     // --- Action: Write original to temp store ---
-    let write_handle = tokio::task::spawn_blocking(move || {
-        item.blocking_write_now();
-        item
-    });
-    let mut item = write_handle.await.unwrap();
+    let write_handle = item.spawn_write_now().await;
+    write_handle.await.unwrap();
     // store: 1, delete: 0
     assert_eq!(setup.calls.store.load(Ordering::SeqCst), 1);
     assert!(setup.store_impl.get_temp_keys().contains(&original_key));
@@ -749,18 +722,13 @@ async fn test_make_mut_shared_clones_no_delete_during_call() {
         content: "make_mut_shared_clone".to_string(),
     };
 
-    let arc1 = Arc::new(setup.pool.insert(data.clone()));
+    let mut arc1 = Arc::new(setup.pool.insert(data.clone()));
     let arc2 = arc1.clone(); // Shared reference
     let original_key = arc1.key();
 
     // --- Action: Write original ---
-    let write_handle = tokio::task::spawn_blocking({
-        move || {
-            arc1.blocking_write_now();
-            arc1
-        }
-    });
-    let mut arc1 = write_handle.await.unwrap();
+    let write_handle = arc1.spawn_write_now().await;
+    write_handle.await.unwrap();
     // store: 1, delete: 0
     assert_eq!(setup.calls.store.load(Ordering::SeqCst), 1);
     assert_eq!(setup.calls.delete.load(Ordering::SeqCst), 0);
@@ -1130,13 +1098,10 @@ async fn test_try_load_mut_triggers_load_if_not_cached() {
     };
 
     // --- Action: Insert A, Write A ---
-    let item_a = setup.pool.insert(data_a.clone());
+    let mut item_a = setup.pool.insert(data_a.clone());
     let original_key_a = item_a.key();
-    let write_handle = tokio::task::spawn_blocking(move || {
-        item_a.blocking_write_now();
-        item_a
-    });
-    let mut item_a = write_handle.await.unwrap(); // A is now in temp store
+    let write_handle = item_a.spawn_write_now().await;
+    write_handle.await.unwrap(); // A is now in temp store
     // store: 1, load: 0, delete: 0
     assert_eq!(setup.calls.store.load(Ordering::SeqCst), 1);
     assert_eq!(setup.calls.load.load(Ordering::SeqCst), 0);
@@ -2028,15 +1993,12 @@ async fn test_load_triggers_blocking_load_if_not_cached() {
     };
 
     // --- Setup: Insert A, write A, evict A ---
-    let item_a = setup.pool.insert(data_a.clone());
-    let key_a = item_a.key();
+    let arc_a = setup.pool.insert(data_a.clone());
+    let key_a = arc_a.key();
 
     // Write A to temp store so it's loadable after eviction
-    let write_handle = tokio::task::spawn_blocking(move || {
-        item_a.blocking_write_now();
-        item_a
-    }); // Use async version for setup convenience
-    let item_a = write_handle.await.unwrap();
+    let write_handle = arc_a.spawn_write_now().await; // Use async version for setup convenience
+    write_handle.await.unwrap();
     assert_eq!(setup.calls.store.load(Ordering::SeqCst), 1); // A stored
     assert!(setup.store_impl.get_temp_keys().contains(&key_a));
     assert_eq!(setup.calls.load.load(Ordering::SeqCst), 0); // No loads yet
@@ -2049,7 +2011,7 @@ async fn test_load_triggers_blocking_load_if_not_cached() {
     // This call will use block_in_place internally because A is not cached.
     // It should block the current async test thread temporarily but succeed
     // because we specified the multi_thread runtime flavor.
-    let guard_a = item_a.load_in_place(); // THE CALL BEING TESTED
+    let guard_a = arc_a.load_in_place(); // THE CALL BEING TESTED
 
     // --- Verification ---
     assert_eq!(*guard_a, data_a); // Verify data is correct
@@ -2058,7 +2020,7 @@ async fn test_load_triggers_blocking_load_if_not_cached() {
 
     // --- Cleanup ---
     drop(guard_a);
-    drop(item_a);
+    drop(arc_a);
     // arc_b drops implicitly
     wait_for_store(&setup.backing_store).await;
     assert!(setup.calls.delete.load(Ordering::SeqCst) >= 1); // A should be deleted
@@ -2138,11 +2100,8 @@ async fn test_try_load_fails_when_not_cached() {
     // --- Setup: Insert A, write A, evict A ---
     let item_a = setup.pool.insert(data_a.clone());
     // Write A to temp store so it *could* be loaded, but won't be by try_load
-    let write_handle = tokio::task::spawn_blocking(move || {
-        item_a.blocking_write_now();
-        item_a
-    });
-    let item_a = write_handle.await.unwrap();
+    let write_handle = item_a.spawn_write_now().await;
+    write_handle.await.unwrap();
     assert_eq!(setup.calls.store.load(Ordering::SeqCst), 1);
 
     // Insert B to evict A
@@ -2175,14 +2134,11 @@ async fn test_sync_try_load_mut_success_when_cached() {
     };
 
     // --- Setup: Insert A, write A. A is cached and unique. ---
-    let item_a = setup.pool.insert(data_a.clone());
+    let mut item_a = setup.pool.insert(data_a.clone());
     let original_key_a = item_a.key();
     // Write A so delete behavior can be verified
-    let write_handle = tokio::task::spawn_blocking(move || {
-        item_a.blocking_write_now();
-        item_a
-    });
-    let mut item_a = write_handle.await.unwrap();
+    let write_handle = item_a.spawn_write_now().await;
+    write_handle.await.unwrap();
     assert_eq!(setup.calls.store.load(Ordering::SeqCst), 1);
     assert!(setup.store_impl.get_temp_keys().contains(&original_key_a));
     assert_eq!(setup.calls.load.load(Ordering::SeqCst), 0); // No loads needed yet
@@ -2232,13 +2188,10 @@ async fn test_sync_try_load_mut_fails_when_not_cached() {
     };
 
     // --- Setup: Insert A, write A, evict A ---
-    let item_a = setup.pool.insert(data_a.clone());
+    let mut item_a = setup.pool.insert(data_a.clone());
     let original_key_a = item_a.key();
-    let write_handle = tokio::task::spawn_blocking(move || {
-        item_a.blocking_write_now();
-        item_a
-    });
-    let mut item_a = write_handle.await.unwrap(); // A is in temp store
+    let write_handle = item_a.spawn_write_now().await;
+    write_handle.await.unwrap(); // A is in temp store
     let _arc_b = setup.pool.insert(data_b.clone()); // Evict A
     wait_for_store(&setup.backing_store).await;
     let initial_delete_count = setup.calls.delete.load(Ordering::SeqCst);
@@ -2423,16 +2376,11 @@ async fn test_async_make_mut_unique_no_clone() {
     };
 
     // --- Setup: Insert A, write A. A is cached and unique. ---
-    let arc_a = Arc::new(setup.pool.insert(data_a.clone()));
+    let mut arc_a = Arc::new(setup.pool.insert(data_a.clone()));
     let original_key_a = arc_a.key();
     // Write A so delete behavior can be verified
-    let write_handle = tokio::task::spawn_blocking({
-        move || {
-            arc_a.blocking_write_now();
-            arc_a
-        }
-    });
-    let mut arc_a = write_handle.await.unwrap();
+    let write_handle = arc_a.spawn_write_now().await;
+    write_handle.await.unwrap();
     assert_eq!(setup.calls.store.load(Ordering::SeqCst), 1);
     assert!(setup.store_impl.get_temp_keys().contains(&original_key_a));
     assert_eq!(Arc::strong_count(&arc_a), 1); // Verify unique
