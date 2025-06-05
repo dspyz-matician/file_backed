@@ -2562,3 +2562,55 @@ async fn test_item_dropped_during_eviction_write_triggers_delete() {
     // _item_b drops implicitly, potentially triggering store/delete for B depending on cache state
     // Just ensure the counts for A are correct.
 }
+
+const DEADLOCK_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// ------------- 1. runtime stress test ------------------------------------
+#[test]
+fn stress_saturated_blocking_pool() {
+    // Single blocking thread, two worker threads.
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(1) // <‑‑ critical
+        .enable_all()
+        .build()
+        .unwrap();
+
+    rt.block_on(async {
+        // Slow "disk" so that the one blocking thread stays busy.
+        let setup = setup_with_store_sleep(1, Duration::from_millis(200));
+        let pool = setup.pool.clone();
+
+        // One FBArc everyone will fight over.
+        let shared = Arc::new(pool.insert(TestData {
+            id: 42,
+            content: "deadlock".into(),
+        }));
+
+        // Spawn N tasks; each task grabs a *mutable* guard (write‑lock) and then
+        // calls spawn_write_now – which needs the (only!) blocking thread.
+        const N: usize = 8;
+        let mut handles = Vec::with_capacity(N);
+        for _ in 0..N {
+            let mut arc = shared.clone();
+            handles.push(tokio::spawn(async move {
+                let mut g = arc.make_mut().await;
+                g.content.push('X'); // keep the write‑lock a bit
+                drop(g);
+                // This waits for a blocking thread while the pool still holds
+                // the entry write‑lock.  With max_blocking_threads = 1 a real
+                // lock‑ordering bug will wedge here for ever.
+                arc.spawn_write_now().await.await.unwrap();
+            }));
+        }
+
+        // If we don't get all the JoinHandles back in time we almost certainly
+        // hit a lock cycle; the timeout turns that into a test failure.
+        tokio::time::timeout(DEADLOCK_TIMEOUT, futures::future::join_all(handles))
+            .await
+            .expect("probable deadlock – the operations never completed");
+
+        // Make sure internal background tasks finish too.
+        setup.backing_store.finished().await;
+    });
+}
