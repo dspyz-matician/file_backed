@@ -824,7 +824,6 @@ async fn test_blocking_save_convenience() {
                 arcs_to_save, // Use the cloned arcs
                 &tracked_clone,
                 4,
-                &tokio::runtime::Handle::current(),
                 change_key_closure,
             )
         }
@@ -1181,14 +1180,7 @@ async fn test_blocking_save_skips_already_persisted() {
         let arcs_clone = vec![arc_a.clone()]; // Only save A first
         let tracked_clone = tracked_path_1.clone();
         move || -> Result<(), String> {
-            blocking_save(
-                &store_clone,
-                arcs_clone,
-                &tracked_clone,
-                1,
-                &tokio::runtime::Handle::current(),
-                || Ok(()),
-            )
+            blocking_save(&store_clone, arcs_clone, &tracked_clone, 1, || Ok(()))
         }
     });
     let result1 = save_handle_1.await.unwrap();
@@ -1222,14 +1214,7 @@ async fn test_blocking_save_skips_already_persisted() {
         let arcs_clone = vec![arc_a.clone(), arc_b.clone()]; // Save A and B
         let tracked_clone = tracked_path_2.clone();
         move || -> Result<(), String> {
-            blocking_save(
-                &store_clone,
-                arcs_clone,
-                &tracked_clone,
-                2,
-                &tokio::runtime::Handle::current(),
-                || Ok(()),
-            )
+            blocking_save(&store_clone, arcs_clone, &tracked_clone, 2, || Ok(()))
         }
     });
     let result2 = save_handle_2.await.unwrap();
@@ -1304,7 +1289,6 @@ async fn test_blocking_save_more_items_than_max_simultaneous() {
                 arcs_clone,
                 &tracked_clone,
                 max_simultaneous, // Apply limit here
-                &tokio::runtime::Handle::current(),
                 change_key_closure,
             )
         }
@@ -1725,14 +1709,7 @@ async fn test_blocking_save_many_deletions_exceeding_limit() {
         let arcs = initial_arcs.clone();
         let tracked = tracked_path_1.clone();
         move || -> Result<(), String> {
-            blocking_save(
-                &store,
-                arcs,
-                &tracked,
-                max_simultaneous,
-                &tokio::runtime::Handle::current(),
-                || Ok(()),
-            )
+            blocking_save(&store, arcs, &tracked, max_simultaneous, || Ok(()))
         }
     });
     assert!(save_handle_1.await.unwrap().is_ok());
@@ -1769,14 +1746,7 @@ async fn test_blocking_save_many_deletions_exceeding_limit() {
         let arcs = new_arcs.clone(); // Only save the new set
         let tracked = tracked_path_2.clone();
         move || -> Result<(), String> {
-            blocking_save(
-                &store,
-                arcs,
-                &tracked,
-                max_simultaneous,
-                &tokio::runtime::Handle::current(),
-                || Ok(()),
-            )
+            blocking_save(&store, arcs, &tracked, max_simultaneous, || Ok(()))
         }
     });
     assert!(save_handle_2.await.unwrap().is_ok());

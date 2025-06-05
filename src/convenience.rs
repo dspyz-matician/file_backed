@@ -67,7 +67,6 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> Fb<T, B> {
 /// * `arcs`: An iterator providing the `Arc<Fb>` handles to persist.
 /// * `tracked`: The target persistent path information.
 /// * `max_simultaneous_tasks`: Controls the parallelism of the persist operations.
-/// * `runtime`: A tokio runtime handle on which to spawn the persist/delete tasks.
 /// * `change_key`: A closure executed *after* all persists succeed but *before* cleanup.
 ///   It should perform the atomic update of the external state.
 ///
@@ -78,7 +77,6 @@ pub fn blocking_save<T: Send + Sync + 'static, B: Strategy<T>, R, E>(
     arcs: impl IntoIterator<Item = Arc<Fb<T, B>>>,
     tracked: &Arc<TrackedPath<B::PersistPath>>,
     max_simultaneous_tasks: usize,
-    runtime: &tokio::runtime::Handle,
     change_key: impl FnOnce() -> Result<R, E>,
 ) -> Result<R, E> {
     blocking_save_with(
@@ -91,7 +89,6 @@ pub fn blocking_save<T: Send + Sync + 'static, B: Strategy<T>, R, E>(
         },
         tracked,
         max_simultaneous_tasks,
-        runtime,
         change_key,
     )
 }
@@ -127,15 +124,19 @@ pub fn blocking_save_with<B: BackingStoreT, R, E>(
     persist_arcs: impl FnOnce(&mut Persister<B>) -> Result<(), E>,
     tracked: &Arc<TrackedPath<B::PersistPath>>,
     max_simultaneous_tasks: usize,
-    runtime: &tokio::runtime::Handle,
     change_key: impl FnOnce() -> Result<R, E>,
 ) -> Result<R, E> {
     let mut old_keys = tracked.all_keys();
-    let new_keys_set = prepare_save(persist_arcs, tracked, max_simultaneous_tasks, runtime)?;
+    let new_keys_set = prepare_save(
+        persist_arcs,
+        tracked,
+        max_simultaneous_tasks,
+        store.runtime_handle(),
+    )?;
     store.blocking_sync(tracked.path());
     let output = change_key()?;
     old_keys.retain(|key| !new_keys_set.contains(key));
-    post_save_cleanup(store, tracked, max_simultaneous_tasks, runtime, &old_keys);
+    post_save_cleanup(store, tracked, max_simultaneous_tasks, &old_keys);
     Ok(output)
 }
 
@@ -165,10 +166,10 @@ pub fn post_save_cleanup<B: BackingStoreT>(
     store: &Arc<BackingStore<B>>,
     tracked: &Arc<TrackedPath<B::PersistPath>>,
     max_simultaneous_tasks: usize,
-    runtime: &tokio::runtime::Handle,
     keys_to_delete: &[Uuid],
 ) {
     assert!(max_simultaneous_tasks > 0);
+    let runtime = store.runtime_handle();
     let mut join_set = JoinSet::new();
     for &key in keys_to_delete {
         if join_set.len() == max_simultaneous_tasks {
