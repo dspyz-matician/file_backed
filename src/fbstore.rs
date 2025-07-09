@@ -248,51 +248,9 @@ impl<C: Send + Sync + 'static> BackingStoreT for FBStore<C> {
         });
     }
 
-    /// Scans the `path` directory for files whose names are valid UUIDs and returns them.
-    ///
-    /// It recursively walks the directory `path`, ignoring subdirectories and any filenames
-    /// present in `path.ignored`. It attempts to parse filenames as simple UUID strings.
-    ///
-    /// **Warning:** Files with non-UTF8 names or names that fail to parse as UUIDs
-    /// will be logged as warnings and **deleted** from the filesystem during the scan.
+    /// See [`sanitize_path`]
     fn sanitize_path(&self, path: &Self::PersistPath) -> impl IntoIterator<Item = Uuid> {
-        WalkDir::new(&**path).into_iter().filter_map(|entry| {
-            let entry = entry.unwrap_or_else(|err| {
-                panic!("Failed to read directory {}: {:?}", path.display(), err)
-            });
-            if entry.file_type().is_dir() {
-                return None;
-            }
-            if let Some(file_name) = entry.file_name().to_str() {
-                if path.ignored.contains(&file_name) {
-                    return None;
-                }
-            }
-            let file_name_os = entry.file_name();
-            let Some(file_name_str) = file_name_os.to_str() else {
-                let path = entry.path();
-                warn!(
-                    "Failed to convert file name to string at {}, deleting file: {:?}",
-                    path.display(),
-                    file_name_os
-                );
-                remove_file(path);
-                return None;
-            };
-            match Uuid::parse_str(file_name_str) {
-                Ok(key) => Some(key),
-                Err(err) => {
-                    let path = entry.path();
-                    warn!(
-                        "Failed to parse UUID from file name {}, deleting file: {:?}",
-                        path.display(),
-                        err
-                    );
-                    remove_file(path);
-                    None
-                }
-            }
-        })
+        sanitize_path(path)
     }
 
     /// Attempts to synchronize the filesystem containing the directory `path`.
@@ -320,6 +278,52 @@ impl<C: Send + Sync + 'static> BackingStoreT for FBStore<C> {
             });
         }
     }
+}
+
+/// Scans the `path` directory for files whose names are valid UUIDs and returns them.
+///
+/// It recursively walks the directory `path`, ignoring subdirectories and any filenames
+/// present in `path.ignored`. It attempts to parse filenames as simple UUID strings.
+///
+/// **Warning:** Files with non-UTF8 names or names that fail to parse as UUIDs
+/// will be logged as warnings and **deleted** from the filesystem during the scan.
+pub fn sanitize_path(path: &PreparedPath) -> impl Iterator<Item = Uuid> {
+    WalkDir::new(&**path).into_iter().filter_map(|entry| {
+        let entry = entry
+            .unwrap_or_else(|err| panic!("Failed to read directory {}: {:?}", path.display(), err));
+        if entry.file_type().is_dir() {
+            return None;
+        }
+        if let Some(file_name) = entry.file_name().to_str() {
+            if path.ignored.contains(&file_name) {
+                return None;
+            }
+        }
+        let file_name_os = entry.file_name();
+        let Some(file_name_str) = file_name_os.to_str() else {
+            let path = entry.path();
+            warn!(
+                "Failed to convert file name to string at {}, deleting file: {:?}",
+                path.display(),
+                file_name_os
+            );
+            remove_file(path);
+            return None;
+        };
+        match Uuid::parse_str(file_name_str) {
+            Ok(key) => Some(key),
+            Err(err) => {
+                let path = entry.path();
+                warn!(
+                    "Failed to parse UUID from file name {}, deleting file: {:?}",
+                    path.display(),
+                    err
+                );
+                remove_file(path);
+                None
+            }
+        }
+    })
 }
 
 fn remove_file(path: &Path) {
