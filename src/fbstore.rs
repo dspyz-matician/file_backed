@@ -269,7 +269,7 @@ impl<C: Send + Sync + 'static> BackingStoreT for FBStore<C> {
         {
             let file = File::open(&**path)
                 .unwrap_or_else(|err| panic!("Failed to open dir {}: {:?}", path.display(), err));
-            nix::unistd::syncfs(std::os::fd::AsRawFd::as_raw_fd(&file)).unwrap_or_else(|err| {
+            nix::unistd::syncfs(&file).unwrap_or_else(|err| {
                 panic!(
                     "Failed to sync file system of dir {}: {:?}",
                     path.display(),

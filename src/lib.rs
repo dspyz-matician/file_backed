@@ -127,7 +127,7 @@ impl<T, B: BackingStoreT> FBPool<T, B> {
         let entry = FullEntry::new(data);
         let mut guard = self.entries.write();
         let index = guard.insert_first(entry.limited());
-        let dump_entry = guard.get(guard.following_ind(1));
+        let dump_entry = guard.get(guard.index_following_qth_cutoff(1));
         if let Some(entry) = dump_entry {
             entry.try_dump_to_disk(&self.store);
         }
@@ -388,7 +388,9 @@ fn shift_forward<T: Send + Sync + 'static, B: Strategy<T>>(
     }
     assert!(preceding_cutoffs == 2);
     let read_guard = parking_lot::RwLockWriteGuard::downgrade(write_guard);
-    let dump_entry = read_guard.get(read_guard.following_ind(1)).unwrap();
+    let dump_entry = read_guard
+        .get(read_guard.index_following_qth_cutoff(1))
+        .unwrap();
     dump_entry.try_dump_to_disk(&pool.store);
 }
 
