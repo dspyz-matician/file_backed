@@ -14,7 +14,7 @@ dashmap = "6.1.0"
 get_mut_drop_weak = "0.1.1"
 log = "0.4.27"
 parking_lot = "0.12.3"
-tokio = { version = ">= 1.44.2, <= 1.47.0", features = ["macros", "rt-multi-thread", "sync"] }
+tokio = { version = ">= 1.44.2, <= 1.47", features = ["macros", "rt-multi-thread", "sync"] }
 tokio-util = { version = "0.7.15", features = ["rt"] }
 uuid = { version = "1.16.0", features = ["v4"] }
 
@@ -25,7 +25,7 @@ walkdir = { version = "2.5.0", optional = true }
 bincode = { version = "2.0.1", features = ["serde"], optional = true }
 serde = { version = "1.0.219", optional = true }
 
-prost = { version = ">= 0.13, <= 0.14.1", optional = true }
+prost = { version = ">= 0.13, <= 0.14", optional = true }
 
 [features]
 fbstore = ["dep:anyhow", "dep:nix", "dep:walkdir", "tokio/fs"]
@@ -35,7 +35,7 @@ prostcodec = ["fbstore", "dep:prost"]
 [dev-dependencies]
 futures = "0.3.31"
 tempfile = "3.19.1"
-tokio = { version = ">= 1.44.2, <= 1.47.0", features = ["time"] }
+tokio = { version = ">= 1.44.2, <= 1.47", features = ["time"] }
 
 [[example]]
 name = "simple_usage"
