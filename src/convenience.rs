@@ -17,7 +17,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> Fb<T, B> {
     ///
     /// If the operation is aborted (e.g., future dropped), this `Arc` might or might
     /// not have been replaced with one wrapping the clone.
-    pub async fn make_mut(self: &mut Arc<Self>) -> WriteGuard<T, B>
+    pub async fn make_mut(self: &mut Arc<Self>) -> WriteGuard<'_, T, B>
     where
         T: Clone,
     {
@@ -35,7 +35,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> Fb<T, B> {
     /// Blocking version of `make_mut`. Waits for the operation (including potential cloning)
     /// to complete. Requires `T: Clone`.
     /// Must not be called from an async context that isn't allowed to block.
-    pub fn blocking_make_mut(self: &mut Arc<Self>) -> WriteGuard<T, B>
+    pub fn blocking_make_mut(self: &mut Arc<Self>) -> WriteGuard<'_, T, B>
     where
         T: Clone,
     {

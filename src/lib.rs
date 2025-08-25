@@ -211,7 +211,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> Fb<T, B> {
     /// Returns a `Future` that resolves to a `ReadGuard` once the data is available
     /// in memory (either immediately or after loading from the backing store).
     /// Suitable for use within `async` functions and tasks.
-    pub async fn load(&self) -> ReadGuard<T, B> {
+    pub async fn load(&self) -> ReadGuard<'_, T, B> {
         // We do this _before_ loading the backing value so that if the caller
         // cancels the operation, we don't waste the work done to load it by
         // immediately dumping it back to disk.
@@ -229,7 +229,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> Fb<T, B> {
     /// Attempts to load the data and return a read guard, returning None if the data is not
     /// already in memory or is currently being evicted.
     /// The entry will only be potentially shifted in the LRU cache on success.
-    pub fn try_load(&self) -> Option<ReadGuard<T, B>> {
+    pub fn try_load(&self) -> Option<ReadGuard<'_, T, B>> {
         let guard = self.entry.try_load()?;
         shift_forward(&self.inner.pool, self.inner.index);
         let on_drop = GuardDropper::new(&self.inner.pool, self.inner.index);
@@ -247,7 +247,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> Fb<T, B> {
     ///
     /// This method should only be called from a context where blocking is acceptable
     /// (e.g., outside a Tokio runtime, or within `spawn_blocking` or `block_in_place`).
-    pub fn blocking_load(&self) -> ReadGuard<T, B> {
+    pub fn blocking_load(&self) -> ReadGuard<'_, T, B> {
         shift_forward(&self.inner.pool, self.inner.index);
         let on_drop = GuardDropper::new(&self.inner.pool, self.inner.index);
         let data_guard = self.entry.blocking_load(&self.inner.pool.store);
@@ -273,7 +273,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> Fb<T, B> {
     /// created using `Runtime::new_current_thread`, as `block_in_place` is not
     /// supported there. Use `load` instead in async contexts and
     /// `blocking_load` in known blocking contexts.
-    pub fn load_in_place(&self) -> ReadGuard<T, B> {
+    pub fn load_in_place(&self) -> ReadGuard<'_, T, B> {
         shift_forward(&self.inner.pool, self.inner.index);
         let on_drop = GuardDropper::new(&self.inner.pool, self.inner.index);
         let data_guard = self.entry.load_in_place(&self.inner.pool.store);
@@ -290,7 +290,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> Fb<T, B> {
     /// 2. The corresponding file in the backing store's temporary location (if any) is deleted.
     /// 3. The internal `Uuid` key for this data is changed.
     /// 4. A `WriteGuard` providing mutable access is returned.
-    pub async fn load_mut(&mut self) -> WriteGuard<T, B> {
+    pub async fn load_mut(&mut self) -> WriteGuard<'_, T, B> {
         // We do this _before_ loading the backing value so that if the caller
         // cancels the operation, we don't waste the work done to load it by
         // immediately dumping it back to disk.
@@ -308,7 +308,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> Fb<T, B> {
     /// Attempts to load the data and return a write guard, returning None if the data is not
     /// already in memory or is currently being evicted.
     /// The entry will only be potentially shifted in the LRU cache on success.
-    pub fn try_load_mut(&mut self) -> Option<WriteGuard<T, B>> {
+    pub fn try_load_mut(&mut self) -> Option<WriteGuard<'_, T, B>> {
         let guard = self.entry.try_load_mut()?;
         shift_forward(&self.inner.pool, self.inner.index);
         let on_drop = GuardDropper::new(&self.inner.pool, self.inner.index);
@@ -320,7 +320,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> Fb<T, B> {
 
     /// Blocking version of `load_mut`. Waits for the operation to complete.
     /// Must not be called from an async context that isn't allowed to block.
-    pub fn blocking_load_mut(&mut self) -> WriteGuard<T, B> {
+    pub fn blocking_load_mut(&mut self) -> WriteGuard<'_, T, B> {
         shift_forward(&self.inner.pool, self.inner.index);
         let on_drop = GuardDropper::new(&self.inner.pool, self.inner.index);
         let data_guard = self.entry.blocking_load_mut(&self.inner.pool.store);

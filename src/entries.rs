@@ -118,7 +118,7 @@ impl<T, B: BackingStoreT> FullEntry<T, B> {
 
 impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
     /// If aborted, the backing value may or may not have been loaded into memory.
-    pub(super) async fn load(&self, store: &Arc<BackingStore<B>>) -> RwLockReadGuard<T> {
+    pub(super) async fn load(&self, store: &Arc<BackingStore<B>>) -> RwLockReadGuard<'_, T> {
         let guard = loop {
             let read_guard = self.backing.read().await;
             if read_guard.memory.is_some() {
@@ -156,7 +156,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
         Some(RwLockReadGuard::map(guard, |b| b.memory.as_ref().unwrap()))
     }
 
-    pub(super) fn blocking_load(&self, store: &BackingStore<B>) -> RwLockReadGuard<T> {
+    pub(super) fn blocking_load(&self, store: &BackingStore<B>) -> RwLockReadGuard<'_, T> {
         let guard = loop {
             let read_guard = self.backing.blocking_read();
             if read_guard.memory.is_some() {
@@ -184,7 +184,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
         RwLockReadGuard::map(guard, |b| b.memory.as_ref().unwrap())
     }
 
-    pub(super) fn load_in_place(&self, store: &Arc<BackingStore<B>>) -> RwLockReadGuard<T> {
+    pub(super) fn load_in_place(&self, store: &Arc<BackingStore<B>>) -> RwLockReadGuard<'_, T> {
         match self.try_load() {
             Some(value) => value,
             None => tokio::task::block_in_place(|| self.blocking_load(store)),
@@ -195,7 +195,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
     pub(super) async fn load_mut(
         &mut self, // &mut necessary to avoid possibility of deadlock
         store: &Arc<BackingStore<B>>,
-    ) -> RwLockMappedWriteGuard<T> {
+    ) -> RwLockMappedWriteGuard<'_, T> {
         let mut guard = loop {
             let borrowed_guard = self.backing.write().await;
             if borrowed_guard.memory.is_some() {
@@ -223,7 +223,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
     /// Returns None if the backing value is not in memory or is currently being
     /// evicted from memory.
     // &mut necessary to avoid possibility of deadlock
-    pub(super) fn try_load_mut(&mut self) -> Option<RwLockMappedWriteGuard<T>> {
+    pub(super) fn try_load_mut(&mut self) -> Option<RwLockMappedWriteGuard<'_, T>> {
         let mut guard = self.backing.try_write().ok()?;
         guard.memory.as_ref()?;
         guard.stored.take();
@@ -234,7 +234,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
     pub(super) fn blocking_load_mut(
         &mut self, // &mut necessary to avoid possibility of deadlock
         store: &BackingStore<B>,
-    ) -> RwLockMappedWriteGuard<T> {
+    ) -> RwLockMappedWriteGuard<'_, T> {
         let mut guard = self.backing.blocking_write();
         let token = guard.stored.take();
         if guard.memory.is_none() {
