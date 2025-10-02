@@ -153,7 +153,7 @@ checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
 
 [[package]]
 name = "file_backed"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "bincode",
@@ -265,9 +265,9 @@ dependencies = [
 
 [[package]]
 name = "get_mut_drop_weak"
-version = "0.1.1"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be51979c7790cde76ff7d158b5150b85150772414440e325e07280b0ec501dcc"
+checksum = "f74fb25ce83c368627a1a8fac10efb44063cf29a7de9a4caa7a0a4efb46232a2"
 
 [[package]]
 name = "getrandom"

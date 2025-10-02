@@ -1,6 +1,6 @@
 [package]
 name = "file_backed"
-version = "0.6.3"
+version = "0.6.4"
 edition = "2024"
 license = "MIT"
 documentation = "https://docs.rs/file_backed"
@@ -11,7 +11,7 @@ description = "Provides types for managing collections of large objects, using a
 consume_on_drop = "0.1.1"
 cutoff_list = "0.2.0"
 dashmap = "6.1.0"
-get_mut_drop_weak = "0.1.1"
+get_mut_drop_weak = "0.2.0"
 log = "0.4.27"
 parking_lot = "0.12.3"
 tokio = { version = ">= 1.44.2, <= 1.47", features = ["macros", "rt-multi-thread", "sync"] }

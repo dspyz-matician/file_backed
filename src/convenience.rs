@@ -1,6 +1,6 @@
 use std::{collections::HashSet, sync::Arc};
 
-use get_mut_drop_weak::get_mut_drop_weak;
+use get_mut_drop_weak::sync::get_mut_drop_weak;
 use tokio::task::JoinSet;
 use uuid::Uuid;
 
