@@ -141,7 +141,9 @@ impl<B: BackingStoreT> Drop for Token<B> {
         let store = Arc::clone(&self.store);
         self.store.spawn_blocking(move || {
             let Entry::Occupied(entry) = store.use_counts.entry(name) else {
-                panic!("Token not found for key: {}", name);
+                // Another token's cleanup task already removed this entry.
+                // This happens when register() reuses a key with a pending cleanup.
+                return;
             };
             if entry.get().strong_count() > 0 {
                 return;
@@ -324,4 +326,52 @@ impl<B: BackingStoreT> BackingStore<B> {
 
 fn key_map(all_keys: impl IntoIterator<Item = Uuid>) -> DashMap<Uuid, ()> {
     DashMap::from_iter(all_keys.into_iter().map(|key| (key, ())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct NoopBacking;
+
+    impl BackingStoreT for NoopBacking {
+        type PersistPath = ();
+        fn delete(&self, _key: Uuid) {}
+        fn delete_persisted(&self, _path: &(), _key: Uuid) {}
+        fn register(&self, _src_path: &(), _key: Uuid) {}
+        fn persist(&self, _dest_path: &(), _key: Uuid) {}
+        fn sanitize_path(&self, _path: &()) -> impl IntoIterator<Item = Uuid> {
+            []
+        }
+        fn sync_persisted(&self, _path: &()) {}
+    }
+
+    /// Two register-then-drop cycles for the same key spawn two deferred cleanup
+    /// tasks. The first cleanup removes the `use_counts` entry; the second finds
+    /// it missing before the cleanup task runs.
+    ///
+    /// Timeline:
+    ///   1. register(key) → Token_A, use_counts[key] = Weak(A)
+    ///   2. drop(Token_A)  → spawns cleanup_A  (deferred, hasn't run yet)
+    ///   3. register(key) → finds Occupied + dead Weak(A), overwrites with Weak(B)
+    ///   4. drop(Token_B)  → spawns cleanup_B  (deferred)
+    ///   5. cleanup_A runs → Weak(B).strong_count()==0 → delete + remove entry
+    ///   6. cleanup_B runs → entry is Vacant
+    #[tokio::test]
+    async fn register_drop_race() {
+        let store = Arc::new(BackingStore::new(
+            NoopBacking,
+            tokio::runtime::Handle::current(),
+        ));
+        let key = Uuid::new_v4();
+        let tracked = TrackedPath {
+            path: (),
+            present: DashMap::from_iter([(key, ())]),
+        };
+
+        drop(store.register(key, &tracked).unwrap());
+        drop(store.register(key, &tracked).unwrap());
+
+        store.finished().await;
+    }
 }
