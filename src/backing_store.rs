@@ -133,6 +133,11 @@ impl<P> TrackedPath<P> {
     pub fn all_keys(&self) -> Vec<Uuid> {
         self.present.iter().map(|entry| *entry.key()).collect()
     }
+
+    /// Returns `true` if the key is known to be persisted at this path.
+    pub fn contains_key(&self, key: Uuid) -> bool {
+        self.present.contains_key(&key)
+    }
 }
 
 impl<B: BackingStoreT> Drop for Token<B> {
