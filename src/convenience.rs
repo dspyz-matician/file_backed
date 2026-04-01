@@ -211,6 +211,12 @@ impl<B: BackingStoreT> Persister<B> {
     where
         B: Strategy<T>,
     {
+        let key = arc.key();
+        self.new_keys_set.insert(key);
+        // Already persisted at this path — skip the tmp write and no-op hard-link.
+        if self.tracked.contains_key(key) {
+            return;
+        }
         assert!(self.join_set.len() <= self.max_simultaneous_tasks);
         if self.join_set.len() == self.max_simultaneous_tasks {
             self.runtime
@@ -219,7 +225,6 @@ impl<B: BackingStoreT> Persister<B> {
                 .unwrap();
         }
         let tracked = Arc::clone(&self.tracked);
-        self.new_keys_set.insert(arc.key());
         let arc = Arc::clone(arc);
         self.join_set.spawn_on(
             async move { arc.spawn_persist(&tracked).await.await.unwrap() },
