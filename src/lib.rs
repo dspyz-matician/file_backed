@@ -19,6 +19,8 @@ pub mod backing_store;
 pub mod convenience;
 #[cfg(feature = "fbstore")]
 pub mod fbstore;
+#[cfg(feature = "redbstore")]
+pub mod redbstore;
 
 use self::backing_store::{Strategy, TrackedPath};
 use self::entries::{FullEntry, LimitedEntry};

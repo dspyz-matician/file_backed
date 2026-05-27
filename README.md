@@ -24,6 +24,9 @@ This crate provides `FBPool` and `Fb` (File-Backed item) to manage data (`T`) th
 
 * **`bincodec`**: Provides `fbstore::BinCodec`, an implementation of `fbstore::Codec<T>` using `bincode` for serialization (requires `T: Serialize + DeserializeOwned`).
 * **`prostcodec`**: Provides `fbstore::ProstCodec`, an implementation of `fbstore::Codec<T>` using `prost` for serialization (requires `T: prost::Message + Default`).
+* **`redbstore`**: Provides `redbstore::RedbStore`, an embedded key-value backing store for small objects.
+* **`redb-bincodec`**: Provides `redbstore::BinCodec`, a byte-oriented `bincode` codec for `RedbStore`.
+* **`redb-prostcodec`**: Provides `redbstore::ProstCodec`, a byte-oriented protobuf codec for `RedbStore`.
 * **`dupe`**: Implements `dupe::Dupe` for `Fb`.
 
 ## Basic Usage
@@ -162,6 +165,15 @@ async fn main() -> anyhow::Result<()> {
 * It requires a `Codec<T>` (`BinCodec` or `ProstCodec` via features, or your own implementation) to handle serialization.
 * It uses a `PreparedPath`, which manages a directory structure (subdirectories `00` to `ff`) for sharding files based on their `Uuid`.
 * `persist` and `register` are implemented using `std::fs::hard_link`.
+
+## Provided Key-Value Backing (`RedbStore`)
+
+`RedbStore` is a redb-based implementation of `BackingStoreT`.
+
+* It stores all items in a single embedded database table keyed by UUID bytes.
+* It is useful when objects are small enough that one file per object creates too much filesystem overhead.
+* It requires a byte-oriented `BlobCodec<T>` (`redbstore::BinCodec` or `redbstore::ProstCodec` via features, or your own implementation).
+* `persist` and `register` copy values between redb databases instead of creating hard links.
 
 ## Concurrency
 
