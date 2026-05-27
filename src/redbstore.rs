@@ -200,6 +200,10 @@ impl<T, C: BlobCodec<T>> Strategy<T> for RedbStore<C> {
     }
 }
 
+pub fn read_blob(path: &RedbPath, key: Uuid) -> Vec<u8> {
+    read_bytes(path, key, "persisted")
+}
+
 fn read_bytes(path: &RedbPath, key: Uuid, label: &str) -> Vec<u8> {
     let read_txn = path.db.begin_read().unwrap_or_else(|err| {
         panic!(
