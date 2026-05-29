@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
+use redb::{Database, Durability, ReadableDatabase, ReadableTable, TableDefinition};
 use uuid::Uuid;
 
 use crate::backing_store::{BackingStoreT, Strategy};
@@ -81,6 +81,22 @@ impl RedbPath {
         let db = Database::create(&path).unwrap_or_else(|err| {
             panic!("Failed to open redb database {}: {err:?}", path.display())
         });
+        Self::from_db(path, db)
+    }
+
+    /// Opens the specified redb database file with a configured cache size, creating it
+    /// if needed, and ensures the blob table exists.
+    pub fn new_with_cache_size(path: PathBuf, cache_size_bytes: usize) -> Self {
+        let db = Database::builder()
+            .set_cache_size(cache_size_bytes)
+            .create(&path)
+            .unwrap_or_else(|err| {
+                panic!("Failed to open redb database {}: {err:?}", path.display())
+            });
+        Self::from_db(path, db)
+    }
+
+    fn from_db(path: PathBuf, db: Database) -> Self {
         let this = Self {
             path: Arc::new(path),
             db: Arc::new(db),
@@ -179,8 +195,27 @@ impl<C: Send + Sync + 'static> BackingStoreT for RedbStore<C> {
             .collect::<Vec<_>>()
     }
 
-    fn sync_persisted(&self, _path: &Self::PersistPath) {
-        // Each mutation is committed durably as part of the operation that performs it.
+    fn sync_persisted(&self, path: &Self::PersistPath) {
+        let mut write_txn = path.db.begin_write().unwrap_or_else(|err| {
+            panic!(
+                "Failed to begin redb sync transaction for {}: {err:?}",
+                path.path.display()
+            )
+        });
+        write_txn
+            .set_durability(Durability::Immediate)
+            .unwrap_or_else(|err| {
+                panic!(
+                    "Failed to set redb sync durability for {}: {err:?}",
+                    path.path.display()
+                )
+            });
+        write_txn.commit().unwrap_or_else(|err| {
+            panic!(
+                "Failed to commit redb sync transaction for {}: {err:?}",
+                path.path.display()
+            )
+        });
     }
 }
 
@@ -242,13 +277,22 @@ fn read_bytes(path: &RedbPath, key: Uuid, label: &str) -> Vec<u8> {
 }
 
 fn insert_bytes(path: &RedbPath, key: Uuid, bytes: &[u8], label: &str) {
-    let write_txn = path.db.begin_write().unwrap_or_else(|err| {
+    let mut write_txn = path.db.begin_write().unwrap_or_else(|err| {
         panic!(
             "Failed to begin redb write transaction for {} store {}: {err:?}",
             label,
             path.path.display()
         )
     });
+    write_txn
+        .set_durability(Durability::None)
+        .unwrap_or_else(|err| {
+            panic!(
+                "Failed to set redb durability for {} store {}: {err:?}",
+                label,
+                path.path.display()
+            )
+        });
     {
         let mut table = write_txn.open_table(BLOBS).unwrap_or_else(|err| {
             panic!(
@@ -283,13 +327,22 @@ fn insert_bytes(path: &RedbPath, key: Uuid, bytes: &[u8], label: &str) {
 }
 
 fn remove_key(path: &RedbPath, key: Uuid, label: &str) {
-    let write_txn = path.db.begin_write().unwrap_or_else(|err| {
+    let mut write_txn = path.db.begin_write().unwrap_or_else(|err| {
         panic!(
             "Failed to begin redb write transaction for {} store {}: {err:?}",
             label,
             path.path.display()
         )
     });
+    write_txn
+        .set_durability(Durability::None)
+        .unwrap_or_else(|err| {
+            panic!(
+                "Failed to set redb durability for {} store {}: {err:?}",
+                label,
+                path.path.display()
+            )
+        });
     {
         let mut table = write_txn.open_table(BLOBS).unwrap_or_else(|err| {
             panic!(
