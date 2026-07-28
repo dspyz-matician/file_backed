@@ -4,7 +4,10 @@ use std::sync::Arc;
 use redb::{Database, Durability, ReadableDatabase, ReadableTable, TableDefinition};
 use uuid::Uuid;
 
+pub use self::redb_bytes::RedbBytes;
 use crate::backing_store::{BackingStoreT, Strategy};
+
+mod redb_bytes;
 
 const BLOBS: TableDefinition<&[u8; 16], &[u8]> = TableDefinition::new("file_backed_blobs");
 
