@@ -8,6 +8,12 @@ use crate::backing_store::{BackingStoreT, Strategy};
 
 const BLOBS: TableDefinition<&[u8; 16], &[u8]> = TableDefinition::new("file_backed_blobs");
 
+/// Name of the database file a redb-backed store keeps inside its directory.
+///
+/// [`RedbPath::in_dir`] opens this file, and archived copies of a store (e.g. inside a tar)
+/// conventionally carry it under this name.
+pub const REDB_FILE_NAME: &str = "file_backed.redb";
+
 /// An implementation of [`BackingStoreT`] and [`Strategy`] that stores blobs in
 /// a redb embedded key-value database.
 ///
@@ -94,6 +100,29 @@ impl RedbPath {
                 panic!("Failed to open redb database {}: {err:?}", path.display())
             });
         Self::from_db(path, db)
+    }
+
+    /// Opens the [`REDB_FILE_NAME`] database inside `dir`, creating the directory and the
+    /// database if needed.
+    ///
+    /// This is the store's single exclusive handle: the contents are enumerated once when the
+    /// path is tracked and membership is tracked in memory rather than via per-element
+    /// syscalls. redb allows one live handle per file per process (clones share it), so a
+    /// second open while a previous handle for the same file is alive panics — keep
+    /// open→use→drop lifetimes disjoint.
+    ///
+    /// # Panics
+    /// Panics if the directory or database cannot be created/opened.
+    pub fn in_dir(dir: &Path) -> Self {
+        Self::new(db_path_in(dir))
+    }
+
+    /// [`Self::in_dir`] with a configured cache size.
+    ///
+    /// # Panics
+    /// Panics if the directory or database cannot be created/opened.
+    pub fn in_dir_with_cache_size(dir: &Path, cache_size_bytes: usize) -> Self {
+        Self::new_with_cache_size(db_path_in(dir), cache_size_bytes)
     }
 
     fn from_db(path: PathBuf, db: Database) -> Self {
@@ -374,6 +403,13 @@ fn remove_key(path: &RedbPath, key: Uuid, label: &str) {
             path.path.display()
         )
     });
+}
+
+fn db_path_in(dir: &Path) -> PathBuf {
+    std::fs::create_dir_all(dir).unwrap_or_else(|err| {
+        panic!("Failed to create directory {}: {err:?}", dir.display())
+    });
+    dir.join(REDB_FILE_NAME)
 }
 
 #[cfg(all(test, feature = "redb-bincodec"))]
