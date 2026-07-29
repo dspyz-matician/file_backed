@@ -415,6 +415,45 @@ fn db_path_in(dir: &Path) -> PathBuf {
     dir.join(REDB_FILE_NAME)
 }
 
+#[cfg(test)]
+mod small_cache_tests {
+    use std::time::Instant;
+
+    use tempfile::tempdir;
+    use uuid::Uuid;
+
+    use super::{RedbPath, insert_bytes, read_bytes};
+
+    /// Persist stores are written one commit per blob and scanned once at startup; confirm
+    /// that workload stays correct and non-pathological with an arbitrarily small page cache.
+    #[test]
+    fn scan_once_workload_with_tiny_cache() {
+        const BLOB: usize = 32 * 1024;
+        const N: usize = 2000;
+        for cache in [64 * 1024, 1024 * 1024, 50 * 1024 * 1024] {
+            let dir = tempdir().unwrap();
+            let keys: Vec<Uuid> = (0..N).map(|i| Uuid::from_u128(i as u128 + 1)).collect();
+            let start_write = Instant::now();
+            {
+                let db = RedbPath::in_dir_with_cache_size(dir.path(), cache);
+                for (i, &key) in keys.iter().enumerate() {
+                    insert_bytes(&db, key, &vec![(i % 251) as u8; BLOB], "persisted");
+                }
+            } // dropping the handle durably commits
+            let write = start_write.elapsed();
+            let start_scan = Instant::now();
+            {
+                let db = RedbPath::in_dir_with_cache_size(dir.path(), cache);
+                for (i, &key) in keys.iter().enumerate() {
+                    assert_eq!(read_bytes(&db, key, "persisted"), vec![(i % 251) as u8; BLOB]);
+                }
+            }
+            let scan = start_scan.elapsed();
+            eprintln!("cache {cache:>9}B: insert {N}x{BLOB}B = {write:?}, full scan = {scan:?}");
+        }
+    }
+}
+
 #[cfg(all(test, feature = "redb-bincodec"))]
 mod tests {
     use std::sync::Arc;
