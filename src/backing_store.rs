@@ -223,6 +223,11 @@ impl<B: BackingStoreT> BackingStore<B> {
 
     /// Returns a reference to the underlying `TaskTracker` used for detecting
     /// when all background tasks have completed.
+    /// Returns the underlying backing-store implementation (e.g. to inspect store statistics).
+    pub fn backing(&self) -> &B {
+        &self.backing
+    }
+
     pub fn task_tracker(&self) -> &TaskTracker {
         &self.task_tracker
     }

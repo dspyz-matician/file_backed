@@ -2,13 +2,14 @@ use std::io;
 use std::sync::RwLock;
 
 use anyhow::Context;
-use redb::{Database, ReadableDatabase, StorageBackend};
+use redb::{Database, ReadableDatabase, StorageBackend, TableDefinition};
 use uuid::Uuid;
 
-use super::BLOBS;
+use super::DEFAULT_NAMESPACE;
 
 /// Read-only access to a redb blob store held entirely in memory — e.g. the
-/// [`REDB_FILE_NAME`](super::REDB_FILE_NAME) entry of an archive.
+/// [`REDB_FILE_NAME`](super::REDB_FILE_NAME) entry of an archive. Reads the
+/// [`DEFAULT_NAMESPACE`] table.
 ///
 /// The database must have been durably committed (via
 /// [`BackingStoreT::sync_persisted`](crate::backing_store::BackingStoreT::sync_persisted) or a
@@ -27,7 +28,10 @@ impl RedbBytes {
 
     /// Reads the blob stored under `key`, erroring if it is absent.
     pub fn blob(&self, key: Uuid) -> anyhow::Result<Vec<u8>> {
-        let table = self.0.begin_read()?.open_table(BLOBS)?;
+        let table = self
+            .0
+            .begin_read()?
+            .open_table(TableDefinition::<&[u8; 16], &[u8]>::new(DEFAULT_NAMESPACE))?;
         let value = table
             .get(key.as_bytes())?
             .with_context(|| format!("Missing key {key} in redb bytes"))?;

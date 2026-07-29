@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+pub use redb::CacheStats;
 use redb::{Database, Durability, ReadableDatabase, ReadableTable, TableDefinition};
 use uuid::Uuid;
 
@@ -9,7 +10,8 @@ use crate::backing_store::{BackingStoreT, Strategy};
 
 mod redb_bytes;
 
-const BLOBS: TableDefinition<&[u8; 16], &[u8]> = TableDefinition::new("file_backed_blobs");
+/// Namespace used by [`RedbPath`]s constructed without an explicit namespace.
+pub const DEFAULT_NAMESPACE: &str = "file_backed_blobs";
 
 /// Name of the database file a redb-backed store keeps inside its directory.
 ///
@@ -73,13 +75,19 @@ impl<T: Default + prost::Message> BlobCodec<T> for ProstCodec {
     }
 }
 
-/// A prepared redb database path.
+/// A redb backend location: a database file plus a namespace (table) within it.
+///
+/// Multiple stores may share one database file, isolated by namespace; they then also share
+/// its page cache (one cache budget for the whole file) and its single writer lock. The
+/// constructors open the file with the [`DEFAULT_NAMESPACE`]; use [`Self::namespaced`] for
+/// further stores in the same file.
 ///
 /// We expect exclusive access to this database file for writes. Multiple
 /// [`RedbPath`] clones share the same opened database handle.
 #[derive(Clone)]
 pub struct RedbPath {
     path: Arc<PathBuf>,
+    namespace: Arc<str>,
     db: Arc<Database>,
 }
 
@@ -131,10 +139,54 @@ impl RedbPath {
     fn from_db(path: PathBuf, db: Database) -> Self {
         let this = Self {
             path: Arc::new(path),
+            namespace: Arc::from(DEFAULT_NAMESPACE),
             db: Arc::new(db),
         };
         this.ensure_table();
         this
+    }
+
+    /// A handle to the `namespace` table of the same database, creating the table if needed.
+    ///
+    /// Shares the opened database handle (and so its page cache and writer lock) with `self`.
+    pub fn namespaced(&self, namespace: &str) -> Self {
+        let this = Self {
+            path: Arc::clone(&self.path),
+            namespace: Arc::from(namespace),
+            db: Arc::clone(&self.db),
+        };
+        this.ensure_table();
+        this
+    }
+
+    /// Deletes every entry in this handle's namespace. Other namespaces are unaffected.
+    pub fn clear(&self) {
+        let write_txn = self.db.begin_write().unwrap_or_else(|err| {
+            panic!("Failed to begin redb write transaction for {self}: {err:?}")
+        });
+        write_txn
+            .delete_table(self.table_def())
+            .unwrap_or_else(|err| panic!("Failed to delete redb table in {self}: {err:?}"));
+        write_txn
+            .open_table(self.table_def())
+            .unwrap_or_else(|err| panic!("Failed to recreate redb table in {self}: {err:?}"));
+        write_txn
+            .commit()
+            .unwrap_or_else(|err| panic!("Failed to commit redb table clear for {self}: {err:?}"));
+    }
+
+    /// Returns statistics for the database's page cache (shared by all namespaces of the file).
+    pub fn cache_stats(&self) -> CacheStats {
+        self.db.cache_stats()
+    }
+
+    /// Returns this handle's namespace within the database.
+    pub fn namespace(&self) -> &str {
+        &self.namespace
+    }
+
+    fn table_def(&self) -> TableDefinition<'_, &'static [u8; 16], &'static [u8]> {
+        TableDefinition::new(&self.namespace)
     }
 
     /// Returns the database file path.
@@ -150,7 +202,7 @@ impl RedbPath {
             )
         });
         {
-            write_txn.open_table(BLOBS).unwrap_or_else(|err| {
+            write_txn.open_table(self.table_def()).unwrap_or_else(|err| {
                 panic!(
                     "Failed to open redb table in {}: {err:?}",
                     self.path.display()
@@ -166,10 +218,21 @@ impl RedbPath {
     }
 }
 
+impl std::fmt::Display for RedbPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}#{}", self.path.display(), self.namespace)
+    }
+}
+
 impl<C> RedbStore<C> {
     /// Creates a new redb-backed store.
     pub fn new(codec: C, db: RedbPath) -> Self {
         Self { codec, db }
+    }
+
+    /// Returns statistics for the store's page cache.
+    pub fn cache_stats(&self) -> CacheStats {
+        self.db.cache_stats()
     }
 }
 
@@ -201,7 +264,7 @@ impl<C: Send + Sync + 'static> BackingStoreT for RedbStore<C> {
                 path.path.display()
             )
         });
-        let table = read_txn.open_table(BLOBS).unwrap_or_else(|err| {
+        let table = read_txn.open_table(path.table_def()).unwrap_or_else(|err| {
             panic!(
                 "Failed to open redb table in {}: {err:?}",
                 path.path.display()
@@ -279,7 +342,7 @@ fn read_bytes(path: &RedbPath, key: Uuid, label: &str) -> Vec<u8> {
             path.path.display()
         )
     });
-    let table = read_txn.open_table(BLOBS).unwrap_or_else(|err| {
+    let table = read_txn.open_table(path.table_def()).unwrap_or_else(|err| {
         panic!(
             "Failed to open redb table for {} store {}: {err:?}",
             label,
@@ -326,7 +389,7 @@ fn insert_bytes(path: &RedbPath, key: Uuid, bytes: &[u8], label: &str) {
             )
         });
     {
-        let mut table = write_txn.open_table(BLOBS).unwrap_or_else(|err| {
+        let mut table = write_txn.open_table(path.table_def()).unwrap_or_else(|err| {
             panic!(
                 "Failed to open redb table for {} store {}: {err:?}",
                 label,
@@ -376,7 +439,7 @@ fn remove_key(path: &RedbPath, key: Uuid, label: &str) {
             )
         });
     {
-        let mut table = write_txn.open_table(BLOBS).unwrap_or_else(|err| {
+        let mut table = write_txn.open_table(path.table_def()).unwrap_or_else(|err| {
             panic!(
                 "Failed to open redb table for {} store {}: {err:?}",
                 label,
@@ -413,6 +476,39 @@ fn db_path_in(dir: &Path) -> PathBuf {
         panic!("Failed to create directory {}: {err:?}", dir.display())
     });
     dir.join(REDB_FILE_NAME)
+}
+
+#[cfg(test)]
+mod namespace_tests {
+    use tempfile::tempdir;
+    use uuid::Uuid;
+
+    use super::{RedbPath, insert_bytes, read_bytes};
+
+    #[test]
+    fn namespaces_share_a_file_but_isolate_entries() {
+        let dir = tempdir().unwrap();
+        let default = RedbPath::in_dir(dir.path());
+        let a = default.namespaced("a");
+        let b = default.namespaced("b");
+        let key = Uuid::new_v4();
+
+        insert_bytes(&default, key, b"default", "persisted");
+        insert_bytes(&a, key, b"a", "persisted");
+        insert_bytes(&b, key, b"b", "persisted");
+
+        assert_eq!(read_bytes(&default, key, "persisted"), b"default");
+        assert_eq!(read_bytes(&a, key, "persisted"), b"a");
+        assert_eq!(read_bytes(&b, key, "persisted"), b"b");
+
+        // `insert_bytes` asserts the key is absent, so re-inserting proves the clear emptied
+        // the namespace, and the later reads prove it touched only namespace `a`.
+        a.clear();
+        insert_bytes(&a, key, b"a2", "persisted");
+        assert_eq!(read_bytes(&a, key, "persisted"), b"a2");
+        assert_eq!(read_bytes(&default, key, "persisted"), b"default");
+        assert_eq!(read_bytes(&b, key, "persisted"), b"b");
+    }
 }
 
 #[cfg(test)]
