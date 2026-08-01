@@ -33,6 +33,19 @@ impl RedbBytes {
             .with_context(|| format!("Missing key {key} in redb bytes"))?;
         Ok(value.value().to_vec())
     }
+
+    /// All keys in the store, in key order.
+    pub fn keys(&self) -> anyhow::Result<Vec<Uuid>> {
+        use redb::ReadableTable;
+        let table = self.0.begin_read()?.open_table(BLOBS)?;
+        table
+            .iter()?
+            .map(|entry| {
+                let (key, _) = entry?;
+                Ok(Uuid::from_bytes(*key.value()))
+            })
+            .collect()
+    }
 }
 
 /// [`redb::backends::InMemoryBackend`], except seeded with the bytes of an existing database.
