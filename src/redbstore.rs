@@ -142,6 +142,89 @@ impl RedbPath {
         &self.path
     }
 
+    /// Writes a canonical copy of this database to `dest`: a fresh database holding the same
+    /// blobs, written in a single sorted transaction. The output bytes are a deterministic
+    /// function of the contents, independent of this database's transaction history (for a
+    /// fixed redb version).
+    ///
+    /// # Panics
+    /// Panics if `dest` already exists or the copy fails.
+    pub fn write_canonical(&self, dest: &Path) {
+        assert!(
+            !dest.exists(),
+            "Canonical copy destination already exists: {}",
+            dest.display()
+        );
+        let read_txn = self.db.begin_read().unwrap_or_else(|err| {
+            panic!(
+                "Failed to begin redb read transaction for {}: {err:?}",
+                self.path.display()
+            )
+        });
+        let src_table = read_txn.open_table(BLOBS).unwrap_or_else(|err| {
+            panic!(
+                "Failed to open redb table in {}: {err:?}",
+                self.path.display()
+            )
+        });
+
+        let dest_db = Database::create(dest).unwrap_or_else(|err| {
+            panic!(
+                "Failed to create canonical redb database {}: {err:?}",
+                dest.display()
+            )
+        });
+        let mut write_txn = dest_db.begin_write().unwrap_or_else(|err| {
+            panic!(
+                "Failed to begin redb write transaction for {}: {err:?}",
+                dest.display()
+            )
+        });
+        write_txn
+            .set_durability(Durability::Immediate)
+            .unwrap_or_else(|err| {
+                panic!(
+                    "Failed to set redb durability for {}: {err:?}",
+                    dest.display()
+                )
+            });
+        {
+            let mut dest_table = write_txn.open_table(BLOBS).unwrap_or_else(|err| {
+                panic!("Failed to open redb table in {}: {err:?}", dest.display())
+            });
+            // Table iteration is in key order, so identical contents yield an identical
+            // sequence of inserts.
+            for entry in src_table.iter().unwrap_or_else(|err| {
+                panic!(
+                    "Failed to iterate redb table in {}: {err:?}",
+                    self.path.display()
+                )
+            }) {
+                let (key, value) = entry.unwrap_or_else(|err| {
+                    panic!(
+                        "Failed to read redb table entry in {}: {err:?}",
+                        self.path.display()
+                    )
+                });
+                let old = dest_table
+                    .insert(key.value(), value.value())
+                    .unwrap_or_else(|err| {
+                        panic!(
+                            "Failed to insert into canonical redb {}: {err:?}",
+                            dest.display()
+                        )
+                    });
+                assert!(old.is_none());
+            }
+        }
+        write_txn.commit().unwrap_or_else(|err| {
+            panic!(
+                "Failed to commit canonical redb copy {}: {err:?}",
+                dest.display()
+            )
+        });
+    }
+
     fn ensure_table(&self) {
         let write_txn = self.db.begin_write().unwrap_or_else(|err| {
             panic!(
@@ -409,9 +492,8 @@ fn remove_key(path: &RedbPath, key: Uuid, label: &str) {
 }
 
 fn db_path_in(dir: &Path) -> PathBuf {
-    std::fs::create_dir_all(dir).unwrap_or_else(|err| {
-        panic!("Failed to create directory {}: {err:?}", dir.display())
-    });
+    std::fs::create_dir_all(dir)
+        .unwrap_or_else(|err| panic!("Failed to create directory {}: {err:?}", dir.display()));
     dir.join(REDB_FILE_NAME)
 }
 
@@ -445,12 +527,58 @@ mod small_cache_tests {
             {
                 let db = RedbPath::in_dir_with_cache_size(dir.path(), cache);
                 for (i, &key) in keys.iter().enumerate() {
-                    assert_eq!(read_bytes(&db, key, "persisted"), vec![(i % 251) as u8; BLOB]);
+                    assert_eq!(
+                        read_bytes(&db, key, "persisted"),
+                        vec![(i % 251) as u8; BLOB]
+                    );
                 }
             }
             let scan = start_scan.elapsed();
             eprintln!("cache {cache:>9}B: insert {N}x{BLOB}B = {write:?}, full scan = {scan:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod canonical_tests {
+    use tempfile::tempdir;
+    use uuid::Uuid;
+
+    use super::{RedbPath, insert_bytes, remove_key};
+
+    /// Two databases with identical contents but different transaction histories produce
+    /// byte-identical canonical copies.
+    #[test]
+    fn canonical_copy_is_history_independent() {
+        let dir = tempdir().unwrap();
+        let keys: Vec<Uuid> = (0..64).map(|_| Uuid::new_v4()).collect();
+        let blob = |key: &Uuid| key.as_bytes().repeat(100);
+
+        let straight = RedbPath::new(dir.path().join("straight.redb"));
+        for key in &keys {
+            insert_bytes(&straight, *key, &blob(key), "test");
+        }
+
+        let churned = RedbPath::new(dir.path().join("churned.redb"));
+        for key in keys.iter().rev() {
+            insert_bytes(&churned, *key, &blob(key), "test");
+        }
+        for key in &keys[..32] {
+            remove_key(&churned, *key, "test");
+        }
+        for key in &keys[..32] {
+            insert_bytes(&churned, *key, &blob(key), "test");
+        }
+
+        straight.write_canonical(&dir.path().join("straight_canonical.redb"));
+        churned.write_canonical(&dir.path().join("churned_canonical.redb"));
+        let straight_bytes = std::fs::read(dir.path().join("straight_canonical.redb")).unwrap();
+        let churned_bytes = std::fs::read(dir.path().join("churned_canonical.redb")).unwrap();
+        assert_ne!(
+            std::fs::read(straight.path()).unwrap(),
+            std::fs::read(churned.path()).unwrap()
+        );
+        assert_eq!(straight_bytes, churned_bytes);
     }
 }
 
