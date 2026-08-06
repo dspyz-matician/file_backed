@@ -32,6 +32,15 @@ pub trait BlobCodec<T>: Send + Sync + 'static {
     /// Encodes `data` into an owned byte vector.
     fn encode(&self, data: &T) -> anyhow::Result<Vec<u8>>;
 
+    /// Encodes `data` and passes the encoded bytes to `use_bytes`.
+    ///
+    /// The bytes are only valid for the duration of the callback, so implementations that
+    /// keep their encoded bytes in a pooled or borrowed buffer can override this to avoid
+    /// allocating a fresh `Vec` per call (and define [`encode`](Self::encode) in terms of it).
+    fn encode_with<R>(&self, data: &T, use_bytes: impl FnOnce(&[u8]) -> R) -> anyhow::Result<R> {
+        Ok(use_bytes(&self.encode(data)?))
+    }
+
     /// Decodes `data` from bytes.
     fn decode(&self, data: &[u8]) -> anyhow::Result<T>;
 }
@@ -268,13 +277,15 @@ impl<C: Send + Sync + 'static> BackingStoreT for RedbStore<C> {
     }
 
     fn register(&self, src_path: &Self::PersistPath, key: Uuid) {
-        let bytes = read_bytes(src_path, key, "persisted");
-        insert_bytes(&self.db, key, &bytes, "temporary");
+        with_bytes(src_path, key, "persisted", |bytes| {
+            insert_bytes(&self.db, key, bytes, "temporary");
+        });
     }
 
     fn persist(&self, dest_path: &Self::PersistPath, key: Uuid) {
-        let bytes = read_bytes(&self.db, key, "temporary");
-        insert_bytes(dest_path, key, &bytes, "persisted");
+        with_bytes(&self.db, key, "temporary", |bytes| {
+            insert_bytes(dest_path, key, bytes, "persisted");
+        });
     }
 
     fn sanitize_path(&self, path: &Self::PersistPath) -> impl IntoIterator<Item = Uuid> {
@@ -336,25 +347,36 @@ impl<C: Send + Sync + 'static> BackingStoreT for RedbStore<C> {
 
 impl<T, C: BlobCodec<T>> Strategy<T> for RedbStore<C> {
     fn store(&self, key: Uuid, data: &T) {
-        let bytes = self.codec.encode(data).unwrap_or_else(|err| {
-            panic!("Failed to encode data for redb key {key}: {err:?}");
-        });
-        insert_bytes(&self.db, key, &bytes, "temporary");
+        self.codec
+            .encode_with(data, |bytes| {
+                insert_bytes(&self.db, key, bytes, "temporary");
+            })
+            .unwrap_or_else(|err| {
+                panic!("Failed to encode data for redb key {key}: {err:?}");
+            });
     }
 
     fn load(&self, key: Uuid) -> T {
-        let bytes = read_bytes(&self.db, key, "temporary");
-        self.codec.decode(&bytes).unwrap_or_else(|err| {
-            panic!("Failed to decode data for redb key {key}: {err:?}");
-        })
+        with_bytes(&self.db, key, "temporary", |bytes| self.codec.decode(bytes)).unwrap_or_else(
+            |err| {
+                panic!("Failed to decode data for redb key {key}: {err:?}");
+            },
+        )
     }
 }
 
+/// Reads the blob stored under `key` into an owned byte vector. Panics if the key is absent.
 pub fn read_blob(path: &RedbPath, key: Uuid) -> Vec<u8> {
-    read_bytes(path, key, "persisted")
+    with_blob(path, key, <[u8]>::to_vec)
 }
 
-fn read_bytes(path: &RedbPath, key: Uuid, label: &str) -> Vec<u8> {
+/// Reads the blob stored under `key` and passes it to `use_bytes` without copying it out of
+/// redb's page cache. Panics if the key is absent.
+pub fn with_blob<R>(path: &RedbPath, key: Uuid, use_bytes: impl FnOnce(&[u8]) -> R) -> R {
+    with_bytes(path, key, "persisted", use_bytes)
+}
+
+fn with_bytes<R>(path: &RedbPath, key: Uuid, label: &str, use_bytes: impl FnOnce(&[u8]) -> R) -> R {
     let read_txn = path.db.begin_read().unwrap_or_else(|err| {
         panic!(
             "Failed to begin redb read transaction for {} store {}: {err:?}",
@@ -369,7 +391,7 @@ fn read_bytes(path: &RedbPath, key: Uuid, label: &str) -> Vec<u8> {
             path.path.display()
         )
     });
-    table
+    let guard = table
         .get(key.as_bytes())
         .unwrap_or_else(|err| {
             panic!(
@@ -386,9 +408,8 @@ fn read_bytes(path: &RedbPath, key: Uuid, label: &str) -> Vec<u8> {
                 label,
                 path.path.display()
             )
-        })
-        .value()
-        .to_vec()
+        });
+    use_bytes(guard.value())
 }
 
 fn insert_bytes(path: &RedbPath, key: Uuid, bytes: &[u8], label: &str) {
@@ -504,7 +525,7 @@ mod small_cache_tests {
     use tempfile::tempdir;
     use uuid::Uuid;
 
-    use super::{RedbPath, insert_bytes, read_bytes};
+    use super::{RedbPath, insert_bytes, with_bytes};
 
     /// Persist stores are written one commit per blob and scanned once at startup; confirm
     /// that workload stays correct and non-pathological with an arbitrarily small page cache.
@@ -528,7 +549,7 @@ mod small_cache_tests {
                 let db = RedbPath::in_dir_with_cache_size(dir.path(), cache);
                 for (i, &key) in keys.iter().enumerate() {
                     assert_eq!(
-                        read_bytes(&db, key, "persisted"),
+                        with_bytes(&db, key, "persisted", <[u8]>::to_vec),
                         vec![(i % 251) as u8; BLOB]
                     );
                 }

@@ -27,11 +27,17 @@ impl RedbBytes {
 
     /// Reads the blob stored under `key`, erroring if it is absent.
     pub fn blob(&self, key: Uuid) -> anyhow::Result<Vec<u8>> {
+        self.with_blob(key, <[u8]>::to_vec)
+    }
+
+    /// Passes the blob stored under `key` to `use_bytes` without copying it out of the
+    /// database, erroring if it is absent.
+    pub fn with_blob<R>(&self, key: Uuid, use_bytes: impl FnOnce(&[u8]) -> R) -> anyhow::Result<R> {
         let table = self.0.begin_read()?.open_table(BLOBS)?;
         let value = table
             .get(key.as_bytes())?
             .with_context(|| format!("Missing key {key} in redb bytes"))?;
-        Ok(value.value().to_vec())
+        Ok(use_bytes(value.value()))
     }
 
     /// All keys in the store, in key order.
