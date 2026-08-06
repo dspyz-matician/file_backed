@@ -158,6 +158,11 @@ impl RedbPath {
     ///
     /// # Panics
     /// Panics if `dest` already exists or the copy fails.
+    #[deprecated(
+        note = "the output bytes are only deterministic on a single machine; they differ \
+                across machines, so this cannot provide canonical bytes for cross-machine \
+                comparison"
+    )]
     pub fn write_canonical(&self, dest: &Path) {
         assert!(
             !dest.exists(),
@@ -561,6 +566,8 @@ mod small_cache_tests {
 }
 
 #[cfg(test)]
+// Exercises the deprecated write_canonical; its single-machine determinism still holds.
+#[allow(deprecated)]
 mod canonical_tests {
     use tempfile::tempdir;
     use uuid::Uuid;
