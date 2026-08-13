@@ -161,6 +161,12 @@ impl Drop for PoisonArm<'_> {
     }
 }
 
+#[cfg(test)]
+/// Serializes tests that either assert on the process-global write-transaction counter
+/// or commit enough transactions to skew it. An upper-bound assertion on a global
+/// counter is only sound when heavy writers cannot run concurrently.
+static WRITE_COUNT_TEST_LOCK: Mutex<()> = Mutex::new(());
+
 /// Upper bound on operations sharing one commit; bounds the dirty pages pinned by the
 /// shared transaction.
 const MAX_OPS_PER_COMMIT: usize = 4096;
@@ -495,6 +501,61 @@ impl<C: Send + Sync + 'static> BackingStoreT for RedbStore<C> {
         });
     }
 
+    fn register_many(&self, src_path: &Self::PersistPath, keys: &[Uuid]) {
+        // A serial caller registering per key pays one commit each (group commit only
+        // batches concurrent callers). Copy in chunks instead: one source read
+        // transaction and one group operation — hence one commit — per chunk.
+        for chunk in keys.chunks(MAX_OPS_PER_COMMIT) {
+            let read_txn = src_path.db().begin_read().unwrap_or_else(|err| {
+                panic!(
+                    "Failed to begin redb read transaction for persisted store {}: {err:?}",
+                    src_path.path().display()
+                )
+            });
+            let src_table = read_txn.open_table(BLOBS).unwrap_or_else(|err| {
+                panic!(
+                    "Failed to open redb table for persisted store {}: {err:?}",
+                    src_path.path().display()
+                )
+            });
+            self.db.inner.submit_write("temporary", |table| {
+                for &key in chunk {
+                    let guard = src_table
+                        .get(key.as_bytes())
+                        .unwrap_or_else(|err| {
+                            panic!(
+                                "Failed to read redb key {} from persisted store {}: {err:?}",
+                                key,
+                                src_path.path().display()
+                            )
+                        })
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "Attempted to register missing redb key {} from persisted store {}",
+                                key,
+                                src_path.path().display()
+                            )
+                        });
+                    let old = table
+                        .insert(key.as_bytes(), guard.value())
+                        .unwrap_or_else(|err| {
+                            panic!(
+                                "Failed to insert redb key {} into temporary store {}: {err:?}",
+                                key,
+                                self.db.path().display()
+                            )
+                        });
+                    assert!(
+                        old.is_none(),
+                        "Attempted to overwrite existing redb key {} in temporary store {}",
+                        key,
+                        self.db.path().display()
+                    );
+                }
+            });
+        }
+    }
+
     fn persist(&self, dest_path: &Self::PersistPath, key: Uuid) {
         with_bytes(&self.db, key, "temporary", |bytes| {
             insert_bytes(dest_path, key, bytes, "persisted");
@@ -665,6 +726,7 @@ mod small_cache_tests {
     /// that workload stays correct and non-pathological with an arbitrarily small page cache.
     #[test]
     fn scan_once_workload_with_tiny_cache() {
+        let _count_guard = crate::redbstore::WRITE_COUNT_TEST_LOCK.lock();
         const BLOB: usize = 32 * 1024;
         const N: usize = 2000;
         for cache in [64 * 1024, 1024 * 1024, 50 * 1024 * 1024] {
@@ -695,6 +757,78 @@ mod small_cache_tests {
 }
 
 #[cfg(test)]
+mod register_many_tests {
+    use std::sync::Arc;
+
+    use tempfile::tempdir;
+    use tokio::runtime::Handle;
+    use uuid::Uuid;
+
+    use crate::BackingStore;
+
+    use super::{BinCodec, RedbPath, RedbStore, total_write_transactions};
+
+    /// A serial caller bulk-registering a whole tracked path must not pay one commit
+    /// per key (group commit cannot batch a lone caller).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bulk_register_batches_commits() {
+        let _count_guard = crate::redbstore::WRITE_COUNT_TEST_LOCK.lock();
+        const N: usize = 512;
+        let cache_dir = tempdir().unwrap();
+        let persist_dir = tempdir().unwrap();
+        let mut keys: Vec<Uuid> = Vec::new();
+
+        {
+            let store = Arc::new(BackingStore::new(
+                RedbStore::new(BinCodec, RedbPath::in_dir(cache_dir.path())),
+                Handle::current(),
+            ));
+            let tracked = Arc::new(
+                store
+                    .track_path(RedbPath::in_dir(persist_dir.path()))
+                    .await
+                    .unwrap(),
+            );
+            let pool: Arc<crate::FBPool<Vec<u8>, _>> =
+                Arc::new(crate::FBPool::new(Arc::clone(&store), 4));
+            for i in 0..N {
+                let item = pool.insert(vec![(i % 251) as u8; 64]);
+                keys.push(item.key());
+                item.spawn_persist(&tracked).await.await.unwrap();
+                drop(item);
+            }
+            store.finished().await;
+        }
+
+        // Fresh process-equivalent: new cache store registering everything persisted.
+        let store = Arc::new(BackingStore::new(
+            RedbStore::new(BinCodec, RedbPath::in_dir(cache_dir.path())),
+            Handle::current(),
+        ));
+        let tracked = store
+            .track_path(RedbPath::in_dir(persist_dir.path()))
+            .await
+            .unwrap();
+        assert_eq!(tracked.all_keys().len(), N);
+        let before = total_write_transactions();
+        let registered = tokio::task::spawn_blocking({
+            let store = Arc::clone(&store);
+            move || store.blocking_register_all(&tracked)
+        })
+        .await
+        .unwrap();
+        let txns = total_write_transactions() - before;
+        assert_eq!(registered.len(), N);
+        assert!(
+            txns < (N / 8) as u64,
+            "bulk register of {N} keys took {txns} write transactions"
+        );
+        drop(registered);
+        store.finished().await;
+    }
+}
+
+#[cfg(test)]
 mod group_commit_tests {
     use tempfile::tempdir;
     use uuid::Uuid;
@@ -705,6 +839,7 @@ mod group_commit_tests {
     /// serialized transaction each behind redb's single-writer lock.
     #[test]
     fn concurrent_writes_share_commits() {
+        let _count_guard = crate::redbstore::WRITE_COUNT_TEST_LOCK.lock();
         const THREADS: usize = 16;
         const OPS_PER_THREAD: usize = 64;
         let dir = tempdir().unwrap();
@@ -723,8 +858,6 @@ mod group_commit_tests {
                 });
             }
         });
-        // The counter is process-global, so unrelated tests running in parallel can only
-        // inflate the delta — the assertion stays sound.
         let txns = total_write_transactions() - before;
         eprintln!("{} ops committed in {txns} transactions", keys.len());
         assert!(

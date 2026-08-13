@@ -29,6 +29,15 @@ pub trait BackingStoreT: Send + Sync + 'static {
     /// This does not load the item into memory.
     fn register(&self, src_path: &Self::PersistPath, key: Uuid);
 
+    /// Bulk [`register`](Self::register). Backends whose per-key registration pays a
+    /// per-operation cost (e.g. a database transaction) should override this to amortize
+    /// it; a serial caller registering one key at a time cannot be batched any other way.
+    fn register_many(&self, src_path: &Self::PersistPath, keys: &[Uuid]) {
+        for &key in keys {
+            self.register(src_path, key);
+        }
+    }
+
     /// Persists the data associated with `key` (currently managed by the store)
     /// to the specified `dest_path`. For filesystems, this is typically implemented
     /// via hard-linking from the store's managed temporary directory to `dest_path`.
@@ -74,6 +83,10 @@ impl<B: BackingStoreT> BackingStoreT for Arc<B> {
         B::register(self, src_path, key)
     }
 
+    fn register_many(&self, src_path: &Self::PersistPath, keys: &[Uuid]) {
+        B::register_many(self, src_path, keys)
+    }
+
     fn persist(&self, dest_path: &Self::PersistPath, key: Uuid) {
         B::persist(self, dest_path, key)
     }
@@ -114,6 +127,23 @@ pub struct BackingStore<B: BackingStoreT> {
 pub(super) struct Token<B: BackingStoreT> {
     key: Uuid,
     store: Arc<BackingStore<B>>,
+}
+
+/// Tokens returned by [`BackingStore::blocking_register_all`], keeping every key at a
+/// tracked path registered. Dropping this releases the bulk registration; keys that
+/// acquired other token holders in the meantime stay registered.
+pub struct RegisteredTokens<B: BackingStoreT>(Vec<Arc<Token<B>>>);
+
+impl<B: BackingStoreT> RegisteredTokens<B> {
+    /// Number of keys held registered.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether the tracked path had no keys.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 /// Represents a persistence path being tracked by the `BackingStore`.
@@ -286,6 +316,58 @@ impl<B: BackingStoreT> BackingStore<B> {
         let new_token = Arc::new(Token { key, store });
         *entry = Arc::downgrade(&new_token);
         Some(new_token)
+    }
+
+    /// Registers every key persisted at `tracked` in one bulk operation and returns
+    /// tokens keeping them all registered. Dropping the returned guard releases them;
+    /// keys that gained other references in the meantime (e.g. a pool `register`
+    /// reusing the live token) survive.
+    ///
+    /// This exists for bulk-load paths that would otherwise `register` keys one at a
+    /// time from a single thread, where per-key backing costs cannot amortize. It must
+    /// not race per-key `register` calls for the same path: the bulk backing copy and
+    /// the token bookkeeping are not atomic with respect to each other.
+    ///
+    /// Must not be called from an async context that isn't allowed to block.
+    pub fn blocking_register_all(
+        self: &Arc<Self>,
+        tracked: &TrackedPath<B::PersistPath>,
+    ) -> RegisteredTokens<B> {
+        let keys = tracked.all_keys();
+        // Only keys with no `use_counts` entry need the backing copy: a live token means
+        // the bytes are already registered, and a dead weak means the bytes are still
+        // present with a cleanup pending — which our new token below will cancel.
+        let to_copy: Vec<Uuid> = keys
+            .iter()
+            .copied()
+            .filter(|key| !self.use_counts.contains_key(key))
+            .collect();
+        self.backing.register_many(tracked.path(), &to_copy);
+        let tokens = keys
+            .into_iter()
+            .map(|key| match self.use_counts.entry(key) {
+                Entry::Vacant(entry) => {
+                    let token = Arc::new(Token {
+                        key,
+                        store: Arc::clone(self),
+                    });
+                    entry.insert(Arc::downgrade(&token));
+                    token
+                }
+                Entry::Occupied(mut entry) => match entry.get().upgrade() {
+                    Some(token) => token,
+                    None => {
+                        let token = Arc::new(Token {
+                            key,
+                            store: Arc::clone(self),
+                        });
+                        *entry.get_mut() = Arc::downgrade(&token);
+                        token
+                    }
+                },
+            })
+            .collect();
+        RegisteredTokens(tokens)
     }
 
     /// Asynchronously triggers the underlying `BackingStoreT::sync_persisted`
