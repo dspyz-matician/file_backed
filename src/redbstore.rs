@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use redb::{Database, Durability, ReadableDatabase, ReadableTable, TableDefinition};
+use parking_lot::{Condvar, Mutex};
+use redb::{Database, Durability, ReadableDatabase, ReadableTable, Table, TableDefinition};
 use uuid::Uuid;
 
 pub use self::redb_bytes::RedbBytes;
@@ -10,6 +12,18 @@ use crate::backing_store::{BackingStoreT, Strategy};
 mod redb_bytes;
 
 const BLOBS: TableDefinition<&[u8; 16], &[u8]> = TableDefinition::new("file_backed_blobs");
+
+static WRITE_TRANSACTIONS: AtomicU64 = AtomicU64::new(0);
+
+/// Total number of redb write transactions committed by this process, across all
+/// redb-backed stores.
+pub fn total_write_transactions() -> u64 {
+    WRITE_TRANSACTIONS.load(Ordering::Relaxed)
+}
+
+fn count_committed_write_transaction() {
+    WRITE_TRANSACTIONS.fetch_add(1, Ordering::Relaxed);
+}
 
 /// Name of the database file a redb-backed store keeps inside its directory.
 ///
@@ -86,10 +100,187 @@ impl<T: Default + prost::Message> BlobCodec<T> for ProstCodec {
 ///
 /// We expect exclusive access to this database file for writes. Multiple
 /// [`RedbPath`] clones share the same opened database handle.
+///
+/// Writes are group-committed: a caller applies its own operation to a shared open write
+/// transaction and returns once the transaction containing it commits. Operations that
+/// arrive while a commit is in flight accumulate into the next transaction, so concurrent
+/// writers share commits instead of serializing one commit each behind redb's
+/// single-writer lock.
 #[derive(Clone)]
 pub struct RedbPath {
-    path: Arc<PathBuf>,
-    db: Arc<Database>,
+    inner: Arc<RedbInner>,
+}
+
+struct RedbInner {
+    path: PathBuf,
+    db: Database,
+    group: Mutex<GroupState>,
+    cv: Condvar,
+}
+
+struct GroupState {
+    /// The shared open transaction that submitted operations apply to. `None` while a
+    /// commit is in flight (or at quiescence — the last applier always commits).
+    txn: Option<redb::WriteTransaction>,
+    committing: bool,
+    /// Number of committed batches; a caller's operation is durable in-process once this
+    /// advances past the value observed at apply time.
+    epoch: u64,
+    ops_in_txn: usize,
+    /// Callers parked waiting for the in-flight commit to finish so they can apply into
+    /// the next transaction. The last applier to find this at zero commits the batch.
+    appliers_waiting: usize,
+    poisoned: bool,
+}
+
+/// Marks the queue poisoned if dropped while armed (i.e. during an unwind out of an apply
+/// or commit), so every caller sharing the failed transaction panics rather than
+/// reporting success.
+struct PoisonArm<'a> {
+    inner: &'a RedbInner,
+    armed: bool,
+}
+
+impl<'a> PoisonArm<'a> {
+    fn new(inner: &'a RedbInner) -> Self {
+        Self { inner, armed: true }
+    }
+
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PoisonArm<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let mut group = self.inner.group.lock();
+            group.poisoned = true;
+            self.inner.cv.notify_all();
+        }
+    }
+}
+
+/// Upper bound on operations sharing one commit; bounds the dirty pages pinned by the
+/// shared transaction.
+const MAX_OPS_PER_COMMIT: usize = 4096;
+
+impl RedbInner {
+    fn assert_not_poisoned(&self, group: &GroupState) {
+        assert!(
+            !group.poisoned,
+            "A previous redb write batch for {} panicked",
+            self.path.display()
+        );
+    }
+
+    /// Waits out any in-flight commit, then leaves a shared transaction open in
+    /// `group.txn`, opening one if needed.
+    fn wait_for_open_txn<'a>(
+        &self,
+        group: &mut parking_lot::MutexGuard<'a, GroupState>,
+        label: &str,
+    ) {
+        self.assert_not_poisoned(group);
+        while group.committing {
+            group.appliers_waiting += 1;
+            self.cv.wait(group);
+            group.appliers_waiting -= 1;
+            self.assert_not_poisoned(group);
+        }
+        if group.txn.is_none() {
+            let mut txn = self.db.begin_write().unwrap_or_else(|err| {
+                panic!(
+                    "Failed to begin redb write transaction for {} store {}: {err:?}",
+                    label,
+                    self.path.display()
+                )
+            });
+            txn.set_durability(Durability::None).unwrap_or_else(|err| {
+                panic!(
+                    "Failed to set redb durability for {} store {}: {err:?}",
+                    label,
+                    self.path.display()
+                )
+            });
+            group.txn = Some(txn);
+            group.ops_in_txn = 0;
+        }
+    }
+
+    /// Applies `apply` to the shared open write transaction and returns once the
+    /// transaction containing it has committed.
+    fn submit_write(&self, label: &str, apply: impl FnOnce(&mut Table<'_, &[u8; 16], &[u8]>)) {
+        let poison_arm = PoisonArm::new(self);
+        let mut group = self.group.lock();
+        self.wait_for_open_txn(&mut group, label);
+        {
+            let txn = group.txn.as_ref().unwrap();
+            let mut table = txn.open_table(BLOBS).unwrap_or_else(|err| {
+                panic!(
+                    "Failed to open redb table for {} store {}: {err:?}",
+                    label,
+                    self.path.display()
+                )
+            });
+            apply(&mut table);
+        }
+        group.ops_in_txn += 1;
+        let my_epoch = group.epoch;
+        if group.appliers_waiting == 0 || group.ops_in_txn >= MAX_OPS_PER_COMMIT {
+            // Nobody is lined up to extend this batch (or it's full): commit it ourselves.
+            let txn = group.txn.take().unwrap();
+            self.commit_batch(group, txn, label);
+        } else {
+            // A parked applier will extend this transaction and eventually commit it.
+            while group.epoch == my_epoch {
+                self.assert_not_poisoned(&group);
+                self.cv.wait(&mut group);
+            }
+        }
+        poison_arm.disarm();
+    }
+
+    /// Durably commits everything submitted so far: takes over the shared transaction
+    /// (or opens an empty one) and commits it with [`Durability::Immediate`].
+    fn commit_durable(&self) {
+        let poison_arm = PoisonArm::new(self);
+        let mut group = self.group.lock();
+        self.wait_for_open_txn(&mut group, "sync");
+        let mut txn = group.txn.take().unwrap();
+        txn.set_durability(Durability::Immediate)
+            .unwrap_or_else(|err| {
+                panic!(
+                    "Failed to set redb sync durability for {}: {err:?}",
+                    self.path.display()
+                )
+            });
+        self.commit_batch(group, txn, "sync");
+        poison_arm.disarm();
+    }
+
+    fn commit_batch(
+        &self,
+        mut group: parking_lot::MutexGuard<'_, GroupState>,
+        txn: redb::WriteTransaction,
+        label: &str,
+    ) {
+        group.committing = true;
+        drop(group);
+        // Committing outside the lock lets the next batch accumulate concurrently.
+        txn.commit().unwrap_or_else(|err| {
+            panic!(
+                "Failed to commit redb write batch for {} store {}: {err:?}",
+                label,
+                self.path.display()
+            )
+        });
+        count_committed_write_transaction();
+        let mut group = self.group.lock();
+        group.committing = false;
+        group.epoch += 1;
+        self.cv.notify_all();
+    }
 }
 
 impl RedbPath {
@@ -139,8 +330,19 @@ impl RedbPath {
 
     fn from_db(path: PathBuf, db: Database) -> Self {
         let this = Self {
-            path: Arc::new(path),
-            db: Arc::new(db),
+            inner: Arc::new(RedbInner {
+                path,
+                db,
+                group: Mutex::new(GroupState {
+                    txn: None,
+                    committing: false,
+                    epoch: 0,
+                    ops_in_txn: 0,
+                    appliers_waiting: 0,
+                    poisoned: false,
+                }),
+                cv: Condvar::new(),
+            }),
         };
         this.ensure_table();
         this
@@ -148,7 +350,11 @@ impl RedbPath {
 
     /// Returns the database file path.
     pub fn path(&self) -> &Path {
-        &self.path
+        &self.inner.path
+    }
+
+    fn db(&self) -> &Database {
+        &self.inner.db
     }
 
     /// Writes a canonical copy of this database to `dest`: a fresh database holding the same
@@ -169,16 +375,16 @@ impl RedbPath {
             "Canonical copy destination already exists: {}",
             dest.display()
         );
-        let read_txn = self.db.begin_read().unwrap_or_else(|err| {
+        let read_txn = self.db().begin_read().unwrap_or_else(|err| {
             panic!(
                 "Failed to begin redb read transaction for {}: {err:?}",
-                self.path.display()
+                self.path().display()
             )
         });
         let src_table = read_txn.open_table(BLOBS).unwrap_or_else(|err| {
             panic!(
                 "Failed to open redb table in {}: {err:?}",
-                self.path.display()
+                self.path().display()
             )
         });
 
@@ -211,13 +417,13 @@ impl RedbPath {
             for entry in src_table.iter().unwrap_or_else(|err| {
                 panic!(
                     "Failed to iterate redb table in {}: {err:?}",
-                    self.path.display()
+                    self.path().display()
                 )
             }) {
                 let (key, value) = entry.unwrap_or_else(|err| {
                     panic!(
                         "Failed to read redb table entry in {}: {err:?}",
-                        self.path.display()
+                        self.path().display()
                     )
                 });
                 let old = dest_table
@@ -237,29 +443,31 @@ impl RedbPath {
                 dest.display()
             )
         });
+        count_committed_write_transaction();
     }
 
     fn ensure_table(&self) {
-        let write_txn = self.db.begin_write().unwrap_or_else(|err| {
+        let write_txn = self.db().begin_write().unwrap_or_else(|err| {
             panic!(
                 "Failed to begin redb write transaction for {}: {err:?}",
-                self.path.display()
+                self.path().display()
             )
         });
         {
             write_txn.open_table(BLOBS).unwrap_or_else(|err| {
                 panic!(
                     "Failed to open redb table in {}: {err:?}",
-                    self.path.display()
+                    self.path().display()
                 )
             });
         }
         write_txn.commit().unwrap_or_else(|err| {
             panic!(
                 "Failed to commit redb table initialization for {}: {err:?}",
-                self.path.display()
+                self.path().display()
             )
         });
+        count_committed_write_transaction();
     }
 }
 
@@ -294,16 +502,16 @@ impl<C: Send + Sync + 'static> BackingStoreT for RedbStore<C> {
     }
 
     fn sanitize_path(&self, path: &Self::PersistPath) -> impl IntoIterator<Item = Uuid> {
-        let read_txn = path.db.begin_read().unwrap_or_else(|err| {
+        let read_txn = path.db().begin_read().unwrap_or_else(|err| {
             panic!(
                 "Failed to begin redb read transaction for {}: {err:?}",
-                path.path.display()
+                path.path().display()
             )
         });
         let table = read_txn.open_table(BLOBS).unwrap_or_else(|err| {
             panic!(
                 "Failed to open redb table in {}: {err:?}",
-                path.path.display()
+                path.path().display()
             )
         });
         table
@@ -311,14 +519,14 @@ impl<C: Send + Sync + 'static> BackingStoreT for RedbStore<C> {
             .unwrap_or_else(|err| {
                 panic!(
                     "Failed to iterate redb table in {}: {err:?}",
-                    path.path.display()
+                    path.path().display()
                 )
             })
             .map(|entry| {
                 let (key, _) = entry.unwrap_or_else(|err| {
                     panic!(
                         "Failed to read redb table entry in {}: {err:?}",
-                        path.path.display()
+                        path.path().display()
                     )
                 });
                 Uuid::from_bytes(*key.value())
@@ -327,26 +535,7 @@ impl<C: Send + Sync + 'static> BackingStoreT for RedbStore<C> {
     }
 
     fn sync_persisted(&self, path: &Self::PersistPath) {
-        let mut write_txn = path.db.begin_write().unwrap_or_else(|err| {
-            panic!(
-                "Failed to begin redb sync transaction for {}: {err:?}",
-                path.path.display()
-            )
-        });
-        write_txn
-            .set_durability(Durability::Immediate)
-            .unwrap_or_else(|err| {
-                panic!(
-                    "Failed to set redb sync durability for {}: {err:?}",
-                    path.path.display()
-                )
-            });
-        write_txn.commit().unwrap_or_else(|err| {
-            panic!(
-                "Failed to commit redb sync transaction for {}: {err:?}",
-                path.path.display()
-            )
-        });
+        path.inner.commit_durable();
     }
 }
 
@@ -382,18 +571,18 @@ pub fn with_blob<R>(path: &RedbPath, key: Uuid, use_bytes: impl FnOnce(&[u8]) ->
 }
 
 fn with_bytes<R>(path: &RedbPath, key: Uuid, label: &str, use_bytes: impl FnOnce(&[u8]) -> R) -> R {
-    let read_txn = path.db.begin_read().unwrap_or_else(|err| {
+    let read_txn = path.db().begin_read().unwrap_or_else(|err| {
         panic!(
             "Failed to begin redb read transaction for {} store {}: {err:?}",
             label,
-            path.path.display()
+            path.path().display()
         )
     });
     let table = read_txn.open_table(BLOBS).unwrap_or_else(|err| {
         panic!(
             "Failed to open redb table for {} store {}: {err:?}",
             label,
-            path.path.display()
+            path.path().display()
         )
     });
     let guard = table
@@ -403,7 +592,7 @@ fn with_bytes<R>(path: &RedbPath, key: Uuid, label: &str, use_bytes: impl FnOnce
                 "Failed to read redb key {} from {} store {}: {err:?}",
                 key,
                 label,
-                path.path.display()
+                path.path().display()
             )
         })
         .unwrap_or_else(|| {
@@ -411,43 +600,20 @@ fn with_bytes<R>(path: &RedbPath, key: Uuid, label: &str, use_bytes: impl FnOnce
                 "Attempted to read missing redb key {} from {} store {}",
                 key,
                 label,
-                path.path.display()
+                path.path().display()
             )
         });
     use_bytes(guard.value())
 }
 
 fn insert_bytes(path: &RedbPath, key: Uuid, bytes: &[u8], label: &str) {
-    let mut write_txn = path.db.begin_write().unwrap_or_else(|err| {
-        panic!(
-            "Failed to begin redb write transaction for {} store {}: {err:?}",
-            label,
-            path.path.display()
-        )
-    });
-    write_txn
-        .set_durability(Durability::None)
-        .unwrap_or_else(|err| {
-            panic!(
-                "Failed to set redb durability for {} store {}: {err:?}",
-                label,
-                path.path.display()
-            )
-        });
-    {
-        let mut table = write_txn.open_table(BLOBS).unwrap_or_else(|err| {
-            panic!(
-                "Failed to open redb table for {} store {}: {err:?}",
-                label,
-                path.path.display()
-            )
-        });
+    path.inner.submit_write(label, |table| {
         let old = table.insert(key.as_bytes(), bytes).unwrap_or_else(|err| {
             panic!(
                 "Failed to insert redb key {} into {} store {}: {err:?}",
                 key,
                 label,
-                path.path.display()
+                path.path().display()
             )
         });
         assert!(
@@ -455,49 +621,19 @@ fn insert_bytes(path: &RedbPath, key: Uuid, bytes: &[u8], label: &str) {
             "Attempted to overwrite existing redb key {} in {} store {}",
             key,
             label,
-            path.path.display()
+            path.path().display()
         );
-    }
-    write_txn.commit().unwrap_or_else(|err| {
-        panic!(
-            "Failed to commit redb insert for {} store {}: {err:?}",
-            label,
-            path.path.display()
-        )
     });
 }
 
 fn remove_key(path: &RedbPath, key: Uuid, label: &str) {
-    let mut write_txn = path.db.begin_write().unwrap_or_else(|err| {
-        panic!(
-            "Failed to begin redb write transaction for {} store {}: {err:?}",
-            label,
-            path.path.display()
-        )
-    });
-    write_txn
-        .set_durability(Durability::None)
-        .unwrap_or_else(|err| {
-            panic!(
-                "Failed to set redb durability for {} store {}: {err:?}",
-                label,
-                path.path.display()
-            )
-        });
-    {
-        let mut table = write_txn.open_table(BLOBS).unwrap_or_else(|err| {
-            panic!(
-                "Failed to open redb table for {} store {}: {err:?}",
-                label,
-                path.path.display()
-            )
-        });
+    path.inner.submit_write(label, |table| {
         let old = table.remove(key.as_bytes()).unwrap_or_else(|err| {
             panic!(
                 "Failed to remove redb key {} from {} store {}: {err:?}",
                 key,
                 label,
-                path.path.display()
+                path.path().display()
             )
         });
         assert!(
@@ -505,15 +641,8 @@ fn remove_key(path: &RedbPath, key: Uuid, label: &str) {
             "Attempted to delete missing redb key {} from {} store {}",
             key,
             label,
-            path.path.display()
+            path.path().display()
         );
-    }
-    write_txn.commit().unwrap_or_else(|err| {
-        panic!(
-            "Failed to commit redb delete for {} store {}: {err:?}",
-            label,
-            path.path.display()
-        )
     });
 }
 
@@ -561,6 +690,50 @@ mod small_cache_tests {
             }
             let scan = start_scan.elapsed();
             eprintln!("cache {cache:>9}B: insert {N}x{BLOB}B = {write:?}, full scan = {scan:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod group_commit_tests {
+    use tempfile::tempdir;
+    use uuid::Uuid;
+
+    use super::{RedbPath, insert_bytes, total_write_transactions, with_bytes};
+
+    /// Concurrent writers must share commits (group commit) instead of paying one
+    /// serialized transaction each behind redb's single-writer lock.
+    #[test]
+    fn concurrent_writes_share_commits() {
+        const THREADS: usize = 16;
+        const OPS_PER_THREAD: usize = 64;
+        let dir = tempdir().unwrap();
+        let db = RedbPath::in_dir(dir.path());
+        let keys: Vec<Uuid> = (0..THREADS * OPS_PER_THREAD)
+            .map(|i| Uuid::from_u128(i as u128 + 1))
+            .collect();
+        let before = total_write_transactions();
+        std::thread::scope(|s| {
+            for chunk in keys.chunks(OPS_PER_THREAD) {
+                let db = &db;
+                s.spawn(move || {
+                    for &key in chunk {
+                        insert_bytes(db, key, key.as_bytes(), "test");
+                    }
+                });
+            }
+        });
+        // The counter is process-global, so unrelated tests running in parallel can only
+        // inflate the delta — the assertion stays sound.
+        let txns = total_write_transactions() - before;
+        eprintln!("{} ops committed in {txns} transactions", keys.len());
+        assert!(
+            txns < (keys.len() / 2) as u64,
+            "expected group commit to share transactions: {txns} txns for {} ops",
+            keys.len()
+        );
+        for &key in &keys {
+            with_bytes(&db, key, "test", |bytes| assert_eq!(bytes, key.as_bytes()));
         }
     }
 }
