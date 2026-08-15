@@ -361,11 +361,34 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> Fb<T, B> {
         self.entry.spawn_persist(&self.inner.pool.store, path).await
     }
 
+    /// [`Self::spawn_persist`], but the spawned task returns persistence errors instead of
+    /// panicking, so a full or failing persist target doesn't kill the process.
+    ///
+    /// Writing to the backing store's temporary location still panics on failure; only the
+    /// persist step (targeting `path`) reports its error. On `Err` the key is not marked
+    /// present at `path`, so the persist can be retried.
+    pub async fn try_spawn_persist(
+        &self,
+        path: &Arc<TrackedPath<B::PersistPath>>,
+    ) -> JoinHandle<anyhow::Result<()>> {
+        self.entry
+            .try_spawn_persist(&self.inner.pool.store, path)
+            .await
+    }
+
     /// Performs a blocking persistence of the data to the specified `TrackedPath`.
     /// Waits for the operation (including any preliminary writes) to complete.
     /// Must not be called from an async context that isn't allowed to block.
     pub fn blocking_persist(&self, path: &TrackedPath<B::PersistPath>) {
         self.entry.blocking_persist(&self.inner.pool.store, path)
+    }
+
+    /// [`Self::blocking_persist`], but returns persistence errors instead of panicking.
+    ///
+    /// See [`Self::try_spawn_persist`] for the exact fallibility contract.
+    pub fn try_blocking_persist(&self, path: &TrackedPath<B::PersistPath>) -> anyhow::Result<()> {
+        self.entry
+            .try_blocking_persist(&self.inner.pool.store, path)
     }
 }
 

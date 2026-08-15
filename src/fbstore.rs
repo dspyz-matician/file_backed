@@ -197,14 +197,10 @@ impl<C: Send + Sync + 'static> BackingStoreT for FBStore<C> {
     }
 
     /// Deletes the file associated with `key` from the specified persistent `path`.
-    ///
-    /// # Panics
-    /// Panics if the file cannot be removed from the *target* path.
-    fn delete_persisted(&self, path: &Self::PersistPath, key: Uuid) {
+    fn delete_persisted(&self, path: &Self::PersistPath, key: Uuid) -> anyhow::Result<()> {
         let file_path = key_path(path, key);
-        fs::remove_file(&file_path).unwrap_or_else(|err| {
-            panic!("Failed to remove file {}: {:?}", file_path.display(), err)
-        });
+        fs::remove_file(&file_path)
+            .with_context(|| format!("Failed to remove file {}", file_path.display()))
     }
 
     /// Registers an item by hard-linking its file from `src_path` into this store's directory.
@@ -232,25 +228,24 @@ impl<C: Send + Sync + 'static> BackingStoreT for FBStore<C> {
     ///
     /// Creates a hard link from the file within this store's directory (`self.path`)
     /// to the target persistent directory (`dest_path`).
-    ///
-    /// # Panics
-    /// Panics if the hard link cannot be created.
-    fn persist(&self, dest_path: &PreparedPath, key: Uuid) {
+    fn persist(&self, dest_path: &PreparedPath, key: Uuid) -> anyhow::Result<()> {
         let src_path = key_path(&self.path, key);
         let dest_path = key_path(dest_path, key);
-        fs::hard_link(&src_path, &dest_path).unwrap_or_else(|err| {
-            panic!(
-                "Failed to create hard link from {} to {}: {:?}",
+        fs::hard_link(&src_path, &dest_path).with_context(|| {
+            format!(
+                "Failed to create hard link from {} to {}",
                 src_path.display(),
-                dest_path.display(),
-                err
+                dest_path.display()
             )
-        });
+        })
     }
 
     /// See [`sanitize_path`]
-    fn sanitize_path(&self, path: &Self::PersistPath) -> impl IntoIterator<Item = Uuid> {
-        sanitize_path(path)
+    fn sanitize_path(
+        &self,
+        path: &Self::PersistPath,
+    ) -> anyhow::Result<impl IntoIterator<Item = Uuid>> {
+        Ok(sanitize_path(path))
     }
 
     /// Attempts to synchronize the filesystem containing the directory `path`.
@@ -260,23 +255,16 @@ impl<C: Send + Sync + 'static> BackingStoreT for FBStore<C> {
     ///
     /// **Platform Specific:** Currently only implemented for Linux using `nix::unistd::syncfs`.
     /// On other platforms, this will be a no-op.
-    ///
-    /// # Panics
-    /// Panics if the directory `path` cannot be opened or if `syncfs` fails.
     #[allow(unused_variables)]
-    fn sync_persisted(&self, path: &Self::PersistPath) {
+    fn sync_persisted(&self, path: &Self::PersistPath) -> anyhow::Result<()> {
         #[cfg(target_os = "linux")]
         {
             let file = File::open(&**path)
-                .unwrap_or_else(|err| panic!("Failed to open dir {}: {:?}", path.display(), err));
-            nix::unistd::syncfs(&file).unwrap_or_else(|err| {
-                panic!(
-                    "Failed to sync file system of dir {}: {:?}",
-                    path.display(),
-                    err
-                )
-            });
+                .with_context(|| format!("Failed to open dir {}", path.display()))?;
+            nix::unistd::syncfs(&file)
+                .with_context(|| format!("Failed to sync file system of dir {}", path.display()))?;
         }
+        Ok(())
     }
 }
 

@@ -1,6 +1,6 @@
 [package]
 name = "file_backed"
-version = "0.6.13"
+version = "0.7.0"
 edition = "2024"
 license = "MIT"
 documentation = "https://docs.rs/file_backed"
@@ -8,6 +8,7 @@ repository = "https://github.com/dspyz-matician/file_backed"
 description = "Provides types for managing collections of large objects, using an in-memory LRU cache backed by persistent storage (typically the filesystem)."
 
 [dependencies]
+anyhow = "1.0.98"
 consume_on_drop = "0.1.1"
 cutoff_list = "0.2.0"
 dashmap = "6.1.0"
@@ -18,7 +19,6 @@ tokio = { version = ">= 1.44.2, <= 1.52", features = ["macros", "rt-multi-thread
 tokio-util = { version = "0.7.15", features = ["rt"] }
 uuid = { version = "1.16.0", features = ["v4"] }
 
-anyhow = { version = "1.0.98", optional = true }
 nix = { version = "0.30.1", features = ["fs"], optional = true }
 walkdir = { version = "2.5.0", optional = true }
 
@@ -29,10 +29,10 @@ prost = { version = ">= 0.13, <= 0.14", optional = true }
 redb = { version = "4.1.0", optional = true }
 
 [features]
-fbstore = ["dep:anyhow", "dep:nix", "dep:walkdir", "tokio/fs"]
+fbstore = ["dep:nix", "dep:walkdir", "tokio/fs"]
 bincodec = ["fbstore", "dep:bincode", "dep:serde"]
 prostcodec = ["fbstore", "dep:prost"]
-redbstore = ["dep:anyhow", "dep:redb"]
+redbstore = ["dep:redb"]
 redb-bincodec = ["redbstore", "dep:bincode", "dep:serde"]
 redb-prostcodec = ["redbstore", "dep:prost"]
 

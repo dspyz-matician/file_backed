@@ -99,7 +99,7 @@ impl BackingStoreT for TestStore {
         );
     }
 
-    fn delete_persisted(&self, path: &Self::PersistPath, key: Uuid) {
+    fn delete_persisted(&self, path: &Self::PersistPath, key: Uuid) -> anyhow::Result<()> {
         self.call_counts
             .delete_persisted
             .fetch_add(1, Ordering::SeqCst);
@@ -118,6 +118,7 @@ impl BackingStoreT for TestStore {
             key,
             path
         );
+        Ok(())
     }
 
     fn register(&self, src_path: &Self::PersistPath, key: Uuid) {
@@ -144,7 +145,7 @@ impl BackingStoreT for TestStore {
         );
     }
 
-    fn persist(&self, dest_path: &Self::PersistPath, key: Uuid) {
+    fn persist(&self, dest_path: &Self::PersistPath, key: Uuid) -> anyhow::Result<()> {
         self.call_counts.persist.fetch_add(1, Ordering::SeqCst);
         println!("TestStore: Persisting key {} to {:?}", key, dest_path);
         // Fail Fast: Assert the key exists in temp store before persisting
@@ -157,25 +158,30 @@ impl BackingStoreT for TestStore {
             .entry(dest_path.to_path_buf())
             .or_default()
             .insert(key);
+        Ok(())
     }
 
-    fn sanitize_path(&self, path: &Self::PersistPath) -> impl IntoIterator<Item = Uuid> {
+    fn sanitize_path(
+        &self,
+        path: &Self::PersistPath,
+    ) -> anyhow::Result<impl IntoIterator<Item = Uuid>> {
         self.call_counts
             .all_persisted_keys
             .fetch_add(1, Ordering::SeqCst);
         println!("TestStore: Getting all persisted keys for {:?}", path);
-        match self.persisted_data.get(path) {
+        Ok(match self.persisted_data.get(path) {
             Some(keys) => keys.iter().map(|k| *k).collect::<Vec<_>>(),
             None => vec![], // Return empty Vec directly
-        }
+        })
     }
 
-    fn sync_persisted(&self, path: &Self::PersistPath) {
+    fn sync_persisted(&self, path: &Self::PersistPath) -> anyhow::Result<()> {
         self.call_counts
             .sync_persisted
             .fetch_add(1, Ordering::SeqCst);
         println!("TestStore: Syncing persisted path {:?}", path);
         // No-op for mock, just count
+        Ok(())
     }
 }
 

@@ -279,15 +279,41 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
         })
     }
 
+    pub(super) async fn try_spawn_persist(
+        &self,
+        store: &Arc<BackingStore<B>>,
+        path: &Arc<TrackedPath<B::PersistPath>>,
+    ) -> JoinHandle<anyhow::Result<()>> {
+        let guard = Arc::clone(&self.backing).read_owned().await;
+        let key = self.key();
+        store.spawn_blocking({
+            let store = Arc::clone(store);
+            let path = Arc::clone(path);
+            move || {
+                let token = Arc::clone(guard.blocking_store(&store, key));
+                drop(guard);
+                store.try_persist(&token, &path)
+            }
+        })
+    }
+
     pub(super) fn blocking_persist(
         &self,
         store: &Arc<BackingStore<B>>,
         path: &TrackedPath<B::PersistPath>,
     ) {
+        self.try_blocking_persist(store, path).unwrap()
+    }
+
+    pub(super) fn try_blocking_persist(
+        &self,
+        store: &Arc<BackingStore<B>>,
+        path: &TrackedPath<B::PersistPath>,
+    ) -> anyhow::Result<()> {
         let guard = self.backing.blocking_read();
         let token = Arc::clone(guard.blocking_store(store, *self.meta.key.try_read().unwrap()));
         drop(guard);
-        store.persist(&token, path);
+        store.try_persist(&token, path)
     }
 }
 

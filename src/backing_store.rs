@@ -21,7 +21,11 @@ pub trait BackingStoreT: Send + Sync + 'static {
     fn delete(&self, key: Uuid);
 
     /// Deletes the data associated with `key` from the persisted location `path`.
-    fn delete_persisted(&self, path: &Self::PersistPath, key: Uuid);
+    ///
+    /// Fallible because persisted locations may live on partitions whose failure
+    /// (e.g. disk-full) the caller wants to survive; errors propagate through the
+    /// `try_*` methods on [`BackingStore`] and panic through the rest.
+    fn delete_persisted(&self, path: &Self::PersistPath, key: Uuid) -> anyhow::Result<()>;
 
     /// Registers an existing item at `src_path` with the given `key`, making it known
     /// to the `BackingStore`. For filesystems, this is typically implemented via hard-linking
@@ -42,15 +46,22 @@ pub trait BackingStoreT: Send + Sync + 'static {
     /// to the specified `dest_path`. For filesystems, this is typically implemented
     /// via hard-linking from the store's managed temporary directory to `dest_path`.
     /// The backing data is never mutated after creation.
-    fn persist(&self, dest_path: &Self::PersistPath, key: Uuid);
+    ///
+    /// Fallible because persisted locations may live on partitions whose failure
+    /// (e.g. disk-full) the caller wants to survive; errors propagate through the
+    /// `try_*` methods on [`BackingStore`]/[`Fb`](crate::Fb) and panic through the rest.
+    fn persist(&self, dest_path: &Self::PersistPath, key: Uuid) -> anyhow::Result<()>;
 
     /// Clean up and prepare the contents of the provided path to be used as a persistent
     /// store and return an iterator over all keys known to exist at the persisted location `path`.
-    fn sanitize_path(&self, path: &Self::PersistPath) -> impl IntoIterator<Item = Uuid>;
+    fn sanitize_path(
+        &self,
+        path: &Self::PersistPath,
+    ) -> anyhow::Result<impl IntoIterator<Item = Uuid>>;
 
     /// Ensures that all previous operations related to `path` are durably stored
     /// (e.g., by calling `syncfs` on the file system containing the directory).
-    fn sync_persisted(&self, path: &Self::PersistPath);
+    fn sync_persisted(&self, path: &Self::PersistPath) -> anyhow::Result<()>;
 }
 
 /// Extends `BackingStoreT` with methods to load and store the actual data (`T`)
@@ -75,7 +86,7 @@ impl<B: BackingStoreT> BackingStoreT for Arc<B> {
         B::delete(self, key)
     }
 
-    fn delete_persisted(&self, path: &Self::PersistPath, key: Uuid) {
+    fn delete_persisted(&self, path: &Self::PersistPath, key: Uuid) -> anyhow::Result<()> {
         B::delete_persisted(self, path, key)
     }
 
@@ -87,15 +98,18 @@ impl<B: BackingStoreT> BackingStoreT for Arc<B> {
         B::register_many(self, src_path, keys)
     }
 
-    fn persist(&self, dest_path: &Self::PersistPath, key: Uuid) {
+    fn persist(&self, dest_path: &Self::PersistPath, key: Uuid) -> anyhow::Result<()> {
         B::persist(self, dest_path, key)
     }
 
-    fn sanitize_path(&self, path: &Self::PersistPath) -> impl IntoIterator<Item = Uuid> {
+    fn sanitize_path(
+        &self,
+        path: &Self::PersistPath,
+    ) -> anyhow::Result<impl IntoIterator<Item = Uuid>> {
         B::sanitize_path(self, path)
     }
 
-    fn sync_persisted(&self, path: &Self::PersistPath) {
+    fn sync_persisted(&self, path: &Self::PersistPath) -> anyhow::Result<()> {
         B::sync_persisted(self, path)
     }
 }
@@ -232,9 +246,17 @@ impl<B: BackingStoreT> BackingStore<B> {
         self: &Arc<Self>,
         path: B::PersistPath,
     ) -> TrackedPath<B::PersistPath> {
-        let all_keys = self.backing.sanitize_path(&path);
+        self.try_blocking_track_path(path).unwrap()
+    }
+
+    /// [`Self::blocking_track_path`], but returns backend errors instead of panicking.
+    pub fn try_blocking_track_path(
+        self: &Arc<Self>,
+        path: B::PersistPath,
+    ) -> anyhow::Result<TrackedPath<B::PersistPath>> {
+        let all_keys = self.backing.sanitize_path(&path)?;
         let present = key_map(all_keys);
-        TrackedPath { path, present }
+        Ok(TrackedPath { path, present })
     }
 
     /// Spawns a blocking function `f` onto the store's managed Tokio runtime's blocking pool.
@@ -288,12 +310,21 @@ impl<B: BackingStoreT> BackingStore<B> {
     }
 
     pub(super) fn persist(&self, token: &Token<B>, tracked: &TrackedPath<B::PersistPath>) {
+        self.try_persist(token, tracked).unwrap()
+    }
+
+    pub(super) fn try_persist(
+        &self,
+        token: &Token<B>,
+        tracked: &TrackedPath<B::PersistPath>,
+    ) -> anyhow::Result<()> {
         let entry = match tracked.present.entry(token.key) {
-            Entry::Occupied(_) => return,
+            Entry::Occupied(_) => return Ok(()),
             Entry::Vacant(entry) => entry,
         };
-        self.backing.persist(&tracked.path, token.key);
+        self.backing.persist(&tracked.path, token.key)?;
         entry.insert(());
+        Ok(())
     }
 
     pub(super) fn register(
@@ -382,7 +413,12 @@ impl<B: BackingStoreT> BackingStore<B> {
     /// Blocking version of `sync`. Calls `BackingStoreT::sync_persisted` and waits for completion.
     /// Must not be called from an async context that isn't allowed to block.
     pub fn blocking_sync(&self, path: &B::PersistPath) {
-        self.backing.sync_persisted(path);
+        self.try_blocking_sync(path).unwrap()
+    }
+
+    /// [`Self::blocking_sync`], but returns backend errors instead of panicking.
+    pub fn try_blocking_sync(&self, path: &B::PersistPath) -> anyhow::Result<()> {
+        self.backing.sync_persisted(path)
     }
 
     /// Asynchronously triggers the underlying `BackingStoreT::delete_persisted`
@@ -398,16 +434,39 @@ impl<B: BackingStoreT> BackingStore<B> {
         self.spawn_blocking(move || this.blocking_delete_persisted(&tracked, key))
     }
 
+    /// [`Self::delete_persisted`], but the spawned task returns backend errors instead of
+    /// panicking.
+    pub fn try_delete_persisted(
+        self: &Arc<Self>,
+        tracked: &Arc<TrackedPath<B::PersistPath>>,
+        key: Uuid,
+    ) -> JoinHandle<anyhow::Result<()>> {
+        let this = Arc::clone(self);
+        let tracked = Arc::clone(tracked);
+        self.spawn_blocking(move || this.try_blocking_delete_persisted(&tracked, key))
+    }
+
     /// Blocking version of `delete_persisted`. Calls `BackingStoreT::delete_persisted`
     /// and waits for completion.
     /// Must not be called from an async context that isn't allowed to block.
     pub fn blocking_delete_persisted(&self, tracked: &TrackedPath<B::PersistPath>, key: Uuid) {
+        self.try_blocking_delete_persisted(tracked, key).unwrap()
+    }
+
+    /// [`Self::blocking_delete_persisted`], but returns backend errors instead of panicking.
+    /// On error the key stays tracked, so the deletion can be retried.
+    pub fn try_blocking_delete_persisted(
+        &self,
+        tracked: &TrackedPath<B::PersistPath>,
+        key: Uuid,
+    ) -> anyhow::Result<()> {
         let entry = match tracked.present.entry(key) {
             Entry::Occupied(entry) => entry,
-            Entry::Vacant(_) => return,
+            Entry::Vacant(_) => return Ok(()),
         };
-        self.backing.delete_persisted(tracked.path(), key);
+        self.backing.delete_persisted(tracked.path(), key)?;
         entry.remove();
+        Ok(())
     }
 }
 
@@ -424,13 +483,19 @@ mod tests {
     impl BackingStoreT for NoopBacking {
         type PersistPath = ();
         fn delete(&self, _key: Uuid) {}
-        fn delete_persisted(&self, _path: &(), _key: Uuid) {}
-        fn register(&self, _src_path: &(), _key: Uuid) {}
-        fn persist(&self, _dest_path: &(), _key: Uuid) {}
-        fn sanitize_path(&self, _path: &()) -> impl IntoIterator<Item = Uuid> {
-            []
+        fn delete_persisted(&self, _path: &(), _key: Uuid) -> anyhow::Result<()> {
+            Ok(())
         }
-        fn sync_persisted(&self, _path: &()) {}
+        fn register(&self, _src_path: &(), _key: Uuid) {}
+        fn persist(&self, _dest_path: &(), _key: Uuid) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn sanitize_path(&self, _path: &()) -> anyhow::Result<impl IntoIterator<Item = Uuid>> {
+            Ok([])
+        }
+        fn sync_persisted(&self, _path: &()) -> anyhow::Result<()> {
+            Ok(())
+        }
     }
 
     /// Two register-then-drop cycles for the same key spawn two deferred cleanup
