@@ -177,15 +177,29 @@ impl<T, B: BackingStoreT> FBPool<T, B> {
         path: &TrackedPath<B::PersistPath>,
         key: Uuid,
     ) -> Option<Fb<T, B>> {
-        let entry = FullEntry::blocking_register(key, &self.store, path)?;
+        self.try_blocking_register(path, key).unwrap()
+    }
+
+    /// [`Self::blocking_register`], but returns backend errors instead of panicking.
+    ///
+    /// `Ok(None)` means `key` is not tracked at `path`; `Err` means the backend failed
+    /// to register it (e.g. its partition is full).
+    pub fn try_blocking_register(
+        self: &Arc<Self>,
+        path: &TrackedPath<B::PersistPath>,
+        key: Uuid,
+    ) -> anyhow::Result<Option<Fb<T, B>>> {
+        let Some(entry) = FullEntry::try_blocking_register(key, &self.store, path)? else {
+            return Ok(None);
+        };
         let index = self.entries.write().insert_last(entry.limited());
-        Some(Fb {
+        Ok(Some(Fb {
             entry,
             inner: FbInner {
                 index,
                 pool: Arc::clone(self),
             },
-        })
+        }))
     }
 
     /// Returns the current number of items managed by the pool (both in memory and on disk).

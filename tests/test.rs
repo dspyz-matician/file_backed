@@ -121,7 +121,7 @@ impl BackingStoreT for TestStore {
         Ok(())
     }
 
-    fn register(&self, src_path: &Self::PersistPath, key: Uuid) {
+    fn register(&self, src_path: &Self::PersistPath, key: Uuid) -> anyhow::Result<()> {
         self.call_counts.register.fetch_add(1, Ordering::SeqCst);
         println!("TestStore: Registering key {} from {:?}", key, src_path);
         // Simulate hard link: ensure it's in persisted and make it available in temp
@@ -143,6 +143,7 @@ impl BackingStoreT for TestStore {
             "Registered key {} not found in temp data (should have been pre-added for mock)",
             key
         );
+        Ok(())
     }
 
     fn persist(&self, dest_path: &Self::PersistPath, key: Uuid) -> anyhow::Result<()> {

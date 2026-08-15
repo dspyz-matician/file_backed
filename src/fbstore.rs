@@ -116,14 +116,16 @@ impl PreparedPath {
     /// process interacts with it, or if the caller modifies files in the
     /// directory directly (besides those which are explicitly ignored), all bets are off.
     ///
-    /// # Panics
-    /// Panics if any required directory cannot be created.
+    /// Directory creation failures (e.g. on a full partition) are logged rather than
+    /// fatal: the path is still usable as a handle, and later stores into missing
+    /// shard directories report their own errors.
     pub async fn new(path: PathBuf, ignored: Vec<&'static str>) -> Self {
         for b in 0..=0xff {
             let dir = path.join(format!("{:02x}", b));
-            tokio::fs::create_dir_all(&dir).await.unwrap_or_else(|err| {
-                panic!("Failed to create directory {}: {:?}", dir.display(), err)
-            });
+            if let Err(err) = tokio::fs::create_dir_all(&dir).await {
+                log::error!("Failed to create directory {}: {err:?}", dir.display());
+                break;
+            }
         }
         Self { path, ignored }
     }
@@ -138,14 +140,16 @@ impl PreparedPath {
     /// * `path` - The root directory path for the store.
     /// * `ignored` - A list of static filenames to ignore within this directory.
     ///
-    /// # Panics
-    /// Panics if any required directory cannot be created.
+    /// Directory creation failures (e.g. on a full partition) are logged rather than
+    /// fatal: the path is still usable as a handle, and later stores into missing
+    /// shard directories report their own errors.
     pub fn blocking_new(path: PathBuf, ignored: Vec<&'static str>) -> Self {
         for b in 0..=0xff {
             let dir = path.join(format!("{:02x}", b));
-            std::fs::create_dir_all(&dir).unwrap_or_else(|err| {
-                panic!("Failed to create directory {}: {:?}", dir.display(), err)
-            });
+            if let Err(err) = std::fs::create_dir_all(&dir) {
+                log::error!("Failed to create directory {}: {err:?}", dir.display());
+                break;
+            }
         }
         Self { path, ignored }
     }
@@ -207,21 +211,16 @@ impl<C: Send + Sync + 'static> BackingStoreT for FBStore<C> {
     ///
     /// This makes an existing file (presumably in a persistent location `src_path`)
     /// known to this store instance without copying data.
-    ///
-    /// # Panics
-    /// Panics if the hard link cannot be created (e.g., different filesystems,
-    /// permissions, source not found, destination exists).
-    fn register(&self, src_path: &PreparedPath, key: Uuid) {
+    fn register(&self, src_path: &PreparedPath, key: Uuid) -> anyhow::Result<()> {
         let src_path = key_path(src_path, key);
         let dest_path = key_path(&self.path, key);
-        fs::hard_link(&src_path, &dest_path).unwrap_or_else(|err| {
-            panic!(
-                "Failed to create hard link from {} to {}: {:?}",
+        fs::hard_link(&src_path, &dest_path).with_context(|| {
+            format!(
+                "Failed to create hard link from {} to {}",
                 src_path.display(),
-                dest_path.display(),
-                err
+                dest_path.display()
             )
-        });
+        })
     }
 
     /// Persists an item managed by this store by hard-linking its file to `dest_path`.
@@ -277,8 +276,20 @@ impl<C: Send + Sync + 'static> BackingStoreT for FBStore<C> {
 /// will be logged as warnings and **deleted** from the filesystem during the scan.
 pub fn sanitize_path(path: &PreparedPath) -> impl Iterator<Item = Uuid> {
     WalkDir::new(&**path).into_iter().filter_map(|entry| {
-        let entry = entry
-            .unwrap_or_else(|err| panic!("Failed to read directory {}: {:?}", path.display(), err));
+        let entry = match entry {
+            Ok(entry) => entry,
+            // Missing root or concurrently-removed entry: nothing there means no keys
+            // (the root may never have been created if the partition was full).
+            Err(err)
+                if err
+                    .io_error()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                warn!("Skipping missing entry under {}: {err:?}", path.display());
+                return None;
+            }
+            Err(err) => panic!("Failed to read directory {}: {:?}", path.display(), err),
+        };
         if entry.file_type().is_dir() {
             return None;
         }

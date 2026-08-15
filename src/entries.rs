@@ -113,17 +113,28 @@ impl<T, B: BackingStoreT> FullEntry<T, B> {
         store: &Arc<BackingStore<B>>,
         path: &TrackedPath<B::PersistPath>,
     ) -> Option<Self> {
-        Some(Self {
+        Self::try_blocking_register(key, store, path).unwrap()
+    }
+
+    pub(super) fn try_blocking_register(
+        key: Uuid,
+        store: &Arc<BackingStore<B>>,
+        path: &TrackedPath<B::PersistPath>,
+    ) -> anyhow::Result<Option<Self>> {
+        let Some(token) = store.try_register(key, path)? else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
             backing: Arc::new(tokio::sync::RwLock::new(Backing {
                 memory: None,
-                stored: OnceLock::from(store.register(key, path)?),
+                stored: OnceLock::from(token),
                 store_init: parking_lot::Mutex::new(()),
             })),
             meta: Arc::new(EntryMetadata {
                 key: parking_lot::RwLock::new(key),
                 in_memory: Notify::new(),
             }),
-        })
+        }))
     }
 }
 

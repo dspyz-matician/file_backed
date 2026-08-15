@@ -31,15 +31,19 @@ pub trait BackingStoreT: Send + Sync + 'static {
     /// to the `BackingStore`. For filesystems, this is typically implemented via hard-linking
     /// the file from `src_path` into the store's managed temporary directory.
     /// This does not load the item into memory.
-    fn register(&self, src_path: &Self::PersistPath, key: Uuid);
+    ///
+    /// Fallible because either side may live on a partition whose failure (e.g.
+    /// disk-full) the caller wants to survive.
+    fn register(&self, src_path: &Self::PersistPath, key: Uuid) -> anyhow::Result<()>;
 
     /// Bulk [`register`](Self::register). Backends whose per-key registration pays a
     /// per-operation cost (e.g. a database transaction) should override this to amortize
     /// it; a serial caller registering one key at a time cannot be batched any other way.
-    fn register_many(&self, src_path: &Self::PersistPath, keys: &[Uuid]) {
+    fn register_many(&self, src_path: &Self::PersistPath, keys: &[Uuid]) -> anyhow::Result<()> {
         for &key in keys {
-            self.register(src_path, key);
+            self.register(src_path, key)?;
         }
+        Ok(())
     }
 
     /// Persists the data associated with `key` (currently managed by the store)
@@ -95,11 +99,11 @@ impl<B: BackingStoreT> BackingStoreT for Arc<B> {
         B::delete_persisted(self, path, key)
     }
 
-    fn register(&self, src_path: &Self::PersistPath, key: Uuid) {
+    fn register(&self, src_path: &Self::PersistPath, key: Uuid) -> anyhow::Result<()> {
         B::register(self, src_path, key)
     }
 
-    fn register_many(&self, src_path: &Self::PersistPath, keys: &[Uuid]) {
+    fn register_many(&self, src_path: &Self::PersistPath, keys: &[Uuid]) -> anyhow::Result<()> {
         B::register_many(self, src_path, keys)
     }
 
@@ -336,26 +340,30 @@ impl<B: BackingStoreT> BackingStore<B> {
         Ok(())
     }
 
-    pub(super) fn register(
+    /// `Ok(None)` means `key` is not tracked at this path; `Err` means the backend
+    /// failed to register it (e.g. its partition is full).
+    pub(super) fn try_register(
         self: &Arc<Self>,
         key: Uuid,
         tracked: &TrackedPath<B::PersistPath>,
-    ) -> Option<Arc<Token<B>>> {
-        let _exists_guard = tracked.present.get(&key)?;
+    ) -> anyhow::Result<Option<Arc<Token<B>>>> {
+        let Some(_exists_guard) = tracked.present.get(&key) else {
+            return Ok(None);
+        };
         let mut entry = match self.use_counts.entry(key) {
             Entry::Vacant(entry) => {
-                self.backing.register(&tracked.path, key);
+                self.backing.register(&tracked.path, key)?;
                 entry.insert(Weak::new())
             }
             Entry::Occupied(entry) => match entry.get().upgrade() {
-                Some(token) => return Some(token),
+                Some(token) => return Ok(Some(token)),
                 None => entry.into_ref(),
             },
         };
         let store = Arc::clone(self);
         let new_token = Arc::new(Token { key, store });
         *entry = Arc::downgrade(&new_token);
-        Some(new_token)
+        Ok(Some(new_token))
     }
 
     /// Registers every key persisted at `tracked` in one bulk operation and returns
@@ -382,7 +390,9 @@ impl<B: BackingStoreT> BackingStore<B> {
             .copied()
             .filter(|key| !self.use_counts.contains_key(key))
             .collect();
-        self.backing.register_many(tracked.path(), &to_copy);
+        self.backing
+            .register_many(tracked.path(), &to_copy)
+            .unwrap();
         let tokens = keys
             .into_iter()
             .map(|key| match self.use_counts.entry(key) {
@@ -495,7 +505,9 @@ mod tests {
         fn delete_persisted(&self, _path: &(), _key: Uuid) -> anyhow::Result<()> {
             Ok(())
         }
-        fn register(&self, _src_path: &(), _key: Uuid) {}
+        fn register(&self, _src_path: &(), _key: Uuid) -> anyhow::Result<()> {
+            Ok(())
+        }
         fn persist(&self, _dest_path: &(), _key: Uuid) -> anyhow::Result<()> {
             Ok(())
         }
@@ -530,8 +542,8 @@ mod tests {
             present: DashMap::from_iter([(key, ())]),
         };
 
-        drop(store.register(key, &tracked).unwrap());
-        drop(store.register(key, &tracked).unwrap());
+        drop(store.try_register(key, &tracked).unwrap().unwrap());
+        drop(store.try_register(key, &tracked).unwrap().unwrap());
 
         store.finished().await;
     }

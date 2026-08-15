@@ -601,69 +601,67 @@ impl<C: Send + Sync + 'static> BackingStoreT for RedbStore<C> {
         try_remove_key(path, key, "persisted")
     }
 
-    fn register(&self, src_path: &Self::PersistPath, key: Uuid) {
+    fn register(&self, src_path: &Self::PersistPath, key: Uuid) -> anyhow::Result<()> {
         with_bytes(src_path, key, "persisted", |bytes| {
-            insert_bytes(&self.db, key, bytes, "temporary");
-        });
+            try_insert_bytes(&self.db, key, bytes, "temporary")
+        })
     }
 
-    fn register_many(&self, src_path: &Self::PersistPath, keys: &[Uuid]) {
+    fn register_many(&self, src_path: &Self::PersistPath, keys: &[Uuid]) -> anyhow::Result<()> {
         // A serial caller registering per key pays one commit each (group commit only
         // batches concurrent callers). Copy in chunks instead: one source read
         // transaction and one group operation — hence one commit — per chunk.
         for chunk in keys.chunks(MAX_OPS_PER_COMMIT) {
-            let read_txn = src_path.db().begin_read().unwrap_or_else(|err| {
-                panic!(
-                    "Failed to begin redb read transaction for persisted store {}: {err:?}",
+            let read_txn = src_path.db().begin_read().with_context(|| {
+                format!(
+                    "Failed to begin redb read transaction for persisted store {}",
                     src_path.path().display()
                 )
-            });
-            let src_table = read_txn.open_table(BLOBS).unwrap_or_else(|err| {
-                panic!(
-                    "Failed to open redb table for persisted store {}: {err:?}",
+            })?;
+            let src_table = read_txn.open_table(BLOBS).with_context(|| {
+                format!(
+                    "Failed to open redb table for persisted store {}",
                     src_path.path().display()
                 )
-            });
-            self.db
-                .inner
-                .submit_write("temporary", |table| {
-                    for &key in chunk {
-                        let guard = src_table
-                            .get(key.as_bytes())
-                            .unwrap_or_else(|err| {
-                                panic!(
-                                    "Failed to read redb key {} from persisted store {}: {err:?}",
-                                    key,
-                                    src_path.path().display()
-                                )
-                            })
-                            .unwrap_or_else(|| {
-                                panic!(
-                                    "Attempted to register missing redb key {} from persisted store {}",
-                                    key,
-                                    src_path.path().display()
-                                )
-                            });
-                        let old = table
-                            .insert(key.as_bytes(), guard.value())
-                            .unwrap_or_else(|err| {
-                                panic!(
-                                    "Failed to insert redb key {} into temporary store {}: {err:?}",
-                                    key,
-                                    self.db.path().display()
-                                )
-                            });
-                        assert!(
-                            old.is_none(),
-                            "Attempted to overwrite existing redb key {} in temporary store {}",
-                            key,
-                            self.db.path().display()
-                        );
-                    }
-                    Ok(())
-                })
-                .unwrap();
+            })?;
+            self.db.inner.submit_write("temporary", |table| {
+                for &key in chunk {
+                    let guard = src_table
+                        .get(key.as_bytes())
+                        .with_context(|| {
+                            format!(
+                                "Failed to read redb key {} from persisted store {}",
+                                key,
+                                src_path.path().display()
+                            )
+                        })?
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "Attempted to register missing redb key {} from persisted store {}",
+                                key,
+                                src_path.path().display()
+                            )
+                        });
+                    let old = table
+                        .insert(key.as_bytes(), guard.value())
+                        .with_context(|| {
+                            format!(
+                                "Failed to insert redb key {} into temporary store {}",
+                                key,
+                                self.db.path().display()
+                            )
+                        })?;
+                    assert!(
+                        old.is_none(),
+                        "Attempted to overwrite existing redb key {} in temporary store {}",
+                        key,
+                        self.db.path().display()
+                    );
+                }
+                Ok(())
+            })?;
         }
+        Ok(())
     }
 
     fn persist(&self, dest_path: &Self::PersistPath, key: Uuid) -> anyhow::Result<()> {
@@ -770,6 +768,7 @@ fn with_bytes<R>(path: &RedbPath, key: Uuid, label: &str, use_bytes: impl FnOnce
     use_bytes(guard.value())
 }
 
+#[cfg(test)]
 fn insert_bytes(path: &RedbPath, key: Uuid, bytes: &[u8], label: &str) {
     try_insert_bytes(path, key, bytes, label).unwrap()
 }
