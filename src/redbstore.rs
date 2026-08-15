@@ -706,14 +706,12 @@ impl<C: Send + Sync + 'static> BackingStoreT for RedbStore<C> {
 }
 
 impl<T, C: BlobCodec<T>> Strategy<T> for RedbStore<C> {
-    fn store(&self, key: Uuid, data: &T) {
+    fn store(&self, key: Uuid, data: &T) -> anyhow::Result<()> {
         self.codec
             .encode_with(data, |bytes| {
-                insert_bytes(&self.db, key, bytes, "temporary");
+                try_insert_bytes(&self.db, key, bytes, "temporary")
             })
-            .unwrap_or_else(|err| {
-                panic!("Failed to encode data for redb key {key}: {err:?}");
-            });
+            .with_context(|| format!("Failed to encode data for redb key {key}"))?
     }
 
     fn load(&self, key: Uuid) -> T {

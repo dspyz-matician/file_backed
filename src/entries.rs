@@ -49,10 +49,19 @@ impl<T, B: BackingStoreT> LimitedEntry<T, B> {
         let key = *self.meta.key.try_read().unwrap();
         let store_clone = Arc::clone(store);
         Some(store.spawn_blocking(move || {
-            guard.blocking_store(&store_clone, key);
-            let old_value = guard.memory.take();
-            drop(guard);
-            drop(old_value);
+            match guard.try_blocking_store(&store_clone, key) {
+                Ok(_) => {
+                    let old_value = guard.memory.take();
+                    drop(guard);
+                    drop(old_value);
+                }
+                // Failing to spill a cache entry is recoverable: keep it in memory
+                // (over budget) and let a later dump or persist retry.
+                Err(err) => {
+                    drop(guard);
+                    log::error!("Keeping {key} in memory; backing store write failed: {err:#}");
+                }
+            }
         }))
     }
 }
@@ -63,6 +72,7 @@ impl<T, B: BackingStoreT> FullEntry<T, B> {
             backing: Arc::new(tokio::sync::RwLock::new(Backing {
                 memory: Some(data),
                 stored: OnceLock::new(),
+                store_init: parking_lot::Mutex::new(()),
             })),
             meta: Arc::new(EntryMetadata {
                 key: parking_lot::RwLock::new(Uuid::new_v4()),
@@ -107,6 +117,7 @@ impl<T, B: BackingStoreT> FullEntry<T, B> {
             backing: Arc::new(tokio::sync::RwLock::new(Backing {
                 memory: None,
                 stored: OnceLock::from(store.register(key, path)?),
+                store_init: parking_lot::Mutex::new(()),
             })),
             meta: Arc::new(EntryMetadata {
                 key: parking_lot::RwLock::new(key),
@@ -290,7 +301,7 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
             let store = Arc::clone(store);
             let path = Arc::clone(path);
             move || {
-                let token = Arc::clone(guard.blocking_store(&store, key));
+                let token = Arc::clone(guard.try_blocking_store(&store, key)?);
                 drop(guard);
                 store.try_persist(&token, &path)
             }
@@ -311,7 +322,8 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
         path: &TrackedPath<B::PersistPath>,
     ) -> anyhow::Result<()> {
         let guard = self.backing.blocking_read();
-        let token = Arc::clone(guard.blocking_store(store, *self.meta.key.try_read().unwrap()));
+        let token =
+            Arc::clone(guard.try_blocking_store(store, *self.meta.key.try_read().unwrap())?);
         drop(guard);
         store.try_persist(&token, path)
     }
@@ -320,6 +332,10 @@ impl<T: Send + Sync + 'static, B: Strategy<T>> FullEntry<T, B> {
 struct Backing<T, B: BackingStoreT> {
     memory: Option<T>,
     stored: OnceLock<Arc<backing_store::Token<B>>>,
+    /// Serializes concurrent read-guard holders racing to initialize `stored`, which
+    /// `OnceLock::get_or_init` used to do before the initializer became fallible
+    /// (`OnceLock::get_or_try_init` is unstable).
+    store_init: parking_lot::Mutex<()>,
 }
 
 impl<T, B: Strategy<T>> Backing<T, B> {
@@ -328,9 +344,24 @@ impl<T, B: Strategy<T>> Backing<T, B> {
         store: &Arc<BackingStore<B>>,
         key: Uuid,
     ) -> &Arc<backing_store::Token<B>> {
-        self.stored.get_or_init(|| {
-            let data = self.memory.as_ref().unwrap();
-            store.store(key, data)
-        })
+        self.try_blocking_store(store, key).unwrap()
+    }
+
+    /// On `Err` nothing is stored, so a later call retries.
+    fn try_blocking_store(
+        &self,
+        store: &Arc<BackingStore<B>>,
+        key: Uuid,
+    ) -> anyhow::Result<&Arc<backing_store::Token<B>>> {
+        if let Some(token) = self.stored.get() {
+            return Ok(token);
+        }
+        let _init_guard = self.store_init.lock();
+        if let Some(token) = self.stored.get() {
+            return Ok(token);
+        }
+        let token = store.try_store(key, self.memory.as_ref().unwrap())?;
+        // Publish before releasing `store_init`, or a racer could double-store the key.
+        Ok(self.stored.get_or_init(|| token))
     }
 }

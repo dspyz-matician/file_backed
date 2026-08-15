@@ -71,7 +71,12 @@ pub trait BackingStoreT: Send + Sync + 'static {
 pub trait Strategy<T>: BackingStoreT {
     /// Stores (or serializes) the `data` for the given `key` into the backing store's
     /// primary (temporary) location.
-    fn store(&self, key: Uuid, data: &T);
+    ///
+    /// Fallible because the primary location may live on a partition whose failure
+    /// (e.g. disk-full) the caller wants to survive. On `Err` nothing may remain stored
+    /// under `key`, so the store can be retried. A failed background eviction keeps the
+    /// value in memory and logs; the `try_*` persist methods propagate the error.
+    fn store(&self, key: Uuid, data: &T) -> anyhow::Result<()>;
 
     /// Loads (or deserializes) the data `T` for the given `key` from the backing store.
     fn load(&self, key: Uuid) -> T;
@@ -115,7 +120,7 @@ impl<B: BackingStoreT> BackingStoreT for Arc<B> {
 }
 
 impl<T, B: Strategy<T>> Strategy<T> for Arc<B> {
-    fn store(&self, key: Uuid, data: &T) {
+    fn store(&self, key: Uuid, data: &T) -> anyhow::Result<()> {
         B::store(self, key, data)
     }
 
@@ -287,7 +292,11 @@ impl<B: BackingStoreT> BackingStore<B> {
         self.task_tracker.wait().await;
     }
 
-    pub(super) fn store<T>(self: &Arc<Self>, key: Uuid, data: &T) -> Arc<Token<B>>
+    pub(super) fn try_store<T>(
+        self: &Arc<Self>,
+        key: Uuid,
+        data: &T,
+    ) -> anyhow::Result<Arc<Token<B>>>
     where
         B: Strategy<T>,
     {
@@ -295,11 +304,11 @@ impl<B: BackingStoreT> BackingStore<B> {
             Entry::Vacant(entry) => entry,
             Entry::Occupied(_) => panic!("Token already exists for key: {}", key),
         };
-        self.backing.store(key, data);
+        self.backing.store(key, data)?;
         let store = Arc::clone(self);
         let token = Arc::new(Token { key, store });
         entry.insert(Arc::downgrade(&token));
-        token
+        Ok(token)
     }
 
     pub(super) fn load<T>(&self, token: &Token<B>) -> T

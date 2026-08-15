@@ -187,7 +187,7 @@ impl BackingStoreT for TestStore {
 
 // Implement the Strategy trait for our TestStore and TestData
 impl Strategy<TestData> for TestStore {
-    fn store(&self, key: Uuid, data: &TestData) {
+    fn store(&self, key: Uuid, data: &TestData) -> anyhow::Result<()> {
         println!("TestStore: Storing key {} data {:?} - STARTING", key, data);
 
         if !self.store_sleep_duration.is_zero() {
@@ -199,6 +199,7 @@ impl Strategy<TestData> for TestStore {
         self.call_counts.store.fetch_add(1, Ordering::SeqCst);
 
         println!("TestStore: Storing key {} data {:?} - COMPLETED", key, data);
+        Ok(())
     }
 
     fn load(&self, key: Uuid) -> TestData {

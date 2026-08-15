@@ -324,21 +324,29 @@ impl<T, C: Codec<T>> Strategy<T> for FBStore<C> {
     ///
     /// The file is created within the store's prepared path (`self.path`).
     /// Uses `OpenOptions::create_new` to avoid overwriting existing files.
-    ///
-    /// # Panics
-    /// Panics if the file cannot be created (e.g., destination exists, permissions)
-    /// or if encoding fails.
-    fn store(&self, key: Uuid, data: &T) {
+    fn store(&self, key: Uuid, data: &T) -> anyhow::Result<()> {
         let file_path = key_path(&self.path, key);
         let mut create_options = fs::OpenOptions::new();
         create_options.create_new(true).write(true);
-        let mut file = create_options.open(&file_path).unwrap_or_else(|err| {
-            panic!("Failed to create file {}: {:?}", file_path.display(), err)
-        });
-        self.codec
+        let mut file = create_options
+            .open(&file_path)
+            .with_context(|| format!("Failed to create file {}", file_path.display()))?;
+        let encoded = self
+            .codec
             .encode(data, &mut file)
-            .with_context(|| format!("Failed to write data to {}", file_path.display(),))
-            .unwrap()
+            .with_context(|| format!("Failed to write data to {}", file_path.display()));
+        if encoded.is_err() {
+            // A partial file would scan back as a valid-looking blob; remove it so the
+            // store can be retried and the next startup scan can't pick it up.
+            drop(file);
+            if let Err(err) = fs::remove_file(&file_path) {
+                warn!(
+                    "Failed to remove partial file {}: {err:?}",
+                    file_path.display()
+                );
+            }
+        }
+        encoded
     }
 
     /// Loads data `T` by reading the file associated with `key` and decoding it.
